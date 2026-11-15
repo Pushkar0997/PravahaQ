@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  pravaha-api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    container_name: pravaha-q-control-plane
+    ports:
+      - "8000:8000"
+    environment:
+      - PRAVAHA_ENV=production
+      - PRAVAHA_DEFAULT_SDK=qiskit
+      - PRAVAHA_ENABLE_CACHE=true
+      - REDIS_URL=redis://pravaha-redis:6379/0
+    env_file:
+      - .env.example
+    depends_on:
+      - pravaha-redis
+    restart: unless-stopped
+
+  pravaha-frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../deploy/Dockerfile.frontend
+    container_name: pravaha-q-obsidian-ui
+    ports:
+      - "5173:80"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+    depends_on:
+      - pravaha-api
+    restart: unless-stopped
+
+  pravaha-redis:
+    image: redis:7.2-alpine
+    container_name: pravaha-q-circuit-cache
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    restart: unless-stopped

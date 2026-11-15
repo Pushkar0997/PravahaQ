@@ -1,0 +1,55 @@
+# ============================================================================
+# PravahaQ v0.1.0 — Default Hybrid Engine & Control Plane Configuration
+# ============================================================================
+
+engine:
+  name: "PravahaQ-Frontier-Engine"
+  version: "0.1.0"
+  compiler_codename: "Vaisheshika-3Local"
+  random_seed: 42
+  sla_timeout_ms: 450
+  enable_sha256_cache: true
+  guarantee_feasibility_repair: true
+
+default_problem:
+  num_edge_nodes: 3
+  num_inference_tasks: 4
+  num_power_states: 2
+  enable_cubic_3body_terms: true
+  unbalanced_penalty_lambda1: 3.5
+  unbalanced_penalty_lambda2: 6.0
+  equality_penalty_weight: 10.0
+
+algorithms:
+  default: "bf_dcqo"
+  bf_dcqo:
+    max_iterations: 4
+    initial_bias_gain: 0.65
+    bias_sharpness_gamma: 2.5
+    agp_commutator_order: 1
+    impulse_dt: 0.45
+    polarization_stop_threshold: 0.92
+  pce_compression:
+    max_correlator_body_k: 3
+    ansatz_layers: 3
+    curriculum_stages:
+      - { stage: 1, alpha: 1.5, beta: 0.10, steps: 25, lr: 0.08 }
+      - { stage: 2, alpha: 3.5, beta: 0.25, steps: 25, lr: 0.05 }
+      - { stage: 3, alpha: 8.0, beta: 0.50, steps: 20, lr: 0.02 }
+  iqo_branch_and_bound:
+    classical_cutoff_vars: 4
+    max_backtrack_branches: 2
+    correlation_threshold: 0.15
+  cd_warm_qaoa:
+    reps_p: 2
+    warmstart_epsilon: 0.25
+    optimizer: "COBYLA"
+    maxiter: 60
+
+mitigation:
+  enable_trex_readout: true
+  enable_zne_extrapolation: true
+  zne_scale_factors: [1.0, 3.0, 5.0]
+  zne_extrapolation_method: "richardson"
+  cvar_alpha: 0.20
+  default_shots: 2048

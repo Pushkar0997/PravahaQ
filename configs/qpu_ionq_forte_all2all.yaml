@@ -1,0 +1,22 @@
+# ============================================================================
+# Hardware Calibration Profile: IonQ Forte Enterprise (Trapped-Ion All-to-All)
+# ============================================================================
+
+provider: "ionq_cloud"
+backend_name: "qpu.forte-enterprise-1"
+architecture: "Acousto-Optic Steered Yb+ Trapped Ion Chain"
+num_physical_qubits: 36
+topology_type: "all_to_all"
+max_connectivity_degree: 35
+
+native_gates:
+  single_qubit: ["gpi", "gpi2", "rz"]
+  two_qubit: ["zz", "ms"]
+
+calibration_telemetry:
+  median_t1_us: 10000000.0
+  median_t2_us: 1000000.0
+  median_1q_gate_error: 0.00020
+  median_2q_ms_error: 0.00400
+  median_readout_error: 0.00350
+  swap_overhead_factor: 1.00

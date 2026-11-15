@@ -1,0 +1,28 @@
+# ============================================================================
+# Hardware Calibration Profile: IBM Quantum Heron r2 (ibm_fez / ibm_torino)
+# ============================================================================
+
+provider: "ibm_quantum_runtime"
+backend_name: "ibm_fez"
+architecture: "Superconducting Tunable-Coupler Transmon"
+num_physical_qubits: 156
+topology_type: "heavy_hex"
+max_connectivity_degree: 3
+
+native_gates:
+  single_qubit: ["rz", "sx", "x"]
+  two_qubit: ["cz"]
+
+calibration_telemetry:
+  median_t1_us: 215.0
+  median_t2_us: 168.0
+  median_1q_gate_error: 0.00024
+  median_2q_cz_error: 0.00180
+  median_readout_error: 0.00850
+  two_qubit_gate_duration_ns: 68.0
+
+runtime_mitigation:
+  optimization_level: 3
+  dynamical_decoupling_sequence: "XX"
+  enable_twirled_readout_extinction: true
+  pauli_twirling_randomizations: 16

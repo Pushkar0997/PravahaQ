@@ -1,0 +1,23 @@
+# ============================================================================
+# Hardware Calibration Profile: Google Quantum AI 2D Planar Grid (Cirq Target)
+# ============================================================================
+
+provider: "google_cirq"
+backend_name: "willow_planar_grid"
+architecture: "Superconducting 2D Planar Transmon Grid"
+num_physical_qubits: 105
+topology_type: "planar_grid_2d"
+grid_dimensions: [10, 11]
+max_connectivity_degree: 4
+
+native_gates:
+  single_qubit: ["PhasedXZGate", "Rz"]
+  two_qubit: ["CZPowGate", "SycamoreGate"]
+
+calibration_telemetry:
+  median_t1_us: 98.0
+  median_t2_us: 89.0
+  median_1q_gate_error: 0.00035
+  median_2q_cz_error: 0.00140
+  median_readout_error: 0.00600
+  two_qubit_gate_duration_ns: 34.0

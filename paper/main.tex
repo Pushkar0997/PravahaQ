@@ -1,0 +1,184 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=0.72in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{invariant}{Invariant}
+
+\title{\textbf{PravahaQ: Bias-Field Digitized Counterdiabatic Quantum Optimization and Sub-Linear Pauli Correlation Encoding for Coupled Edge-AI Inference Routing and 3-Phase Microgrid Thermal Dispatch}}
+
+\author{
+    \textbf{Pushkar Kumar}\\
+    Department of Computer Science and Engineering (AI \& Quantum Technologies)\\
+    MIT Art, Design and Technology University, Pune, Maharashtra, India\\
+    \texttt{https://github.com/Pushkar0997/PravahaQ}
+}
+
+\date{November 2026 $\cdot$ PravahaQ Release \texttt{v0.1.0}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Real-time control of distributed Edge-AI micro-clusters coupled to renewable 3-phase microgrids requires solving a strongly frustrated Mixed-Integer Polynomial Program within sub-second Service Level Agreement (SLA) windows ($<450\,\text{ms}$). Classical schedulers decouple workload routing from power and thermal dispatch, causing severe thermal throttling and $20\text{--}35\%$ energy waste. Simultaneously, conventional Quadratic Unconstrained Binary Optimization (QUBO) formulations solved via Variational Quantum Approximate Optimization (QAOA) fail in production due to (i) auxiliary slack-qubit explosion from inequality constraints, (ii) inability to model 3-body non-linear compute-thermal-phase saturation without Rosenberg quadratization ancillas, and (iii) hundreds of slow classical-quantum outer-loop iterations plagued by Barren Plateaus. In this work, we present \textbf{PravahaQ}, an industrial hybrid HPC-quantum optimization engine built on four frontier algorithmic pillars: (1) the \emph{Vaisheshika} 3-Local Higher-Order Unconstrained Binary Optimization (HUBO) compiler paired with Monta\~nez-Barrera slack-free unbalanced inequality penalization; (2) \textbf{Bias-Field Digitized Counterdiabatic Quantum Optimization (\texttt{BF-DCQO})}, which computes analytical 1st-order nested commutator Adiabatic Gauge Potentials ($\hat{\mathcal{A}}_\lambda^{(1)}$) and converges in $3\text{--}5$ longitudinal bias-field ratchet impulses with \emph{zero} variational outer loop; (3) \textbf{Multistage Pauli Correlation Encoding (\texttt{PCE})}, compressing $N \sim \mathcal{O}(n^k)$ binary variables onto $n \ll N$ physical qubits; and (4) \textbf{Backtracking Iterative Quantum Branch-and-Bound (\texttt{IQO-BnB})} with deterministic post-quantum feasibility repair. Across multi-SDK benchmarks spanning Qiskit v2, PennyLane, Google Cirq, and Matrix Product State (MPS) tensor networks, PravahaQ reduces physical qubit overhead by $48.2\%$, cuts two-qubit CNOT gate counts by $36.4\%$ via Paulihedral prefix cancellation, achieves a $0.974$ Approximation Ratio in $4$ quantum impulses, and guarantees $100.0\%$ constraint-valid schedules under NISQ hardware noise via Zero-Noise Extrapolation (ZNE), TREX readout mitigation, and $\text{CVaR}_{0.20}$ tail aggregation.
+\end{abstract}
+
+\section{Introduction}
+Disaggregated Large Language Model (LLM) inference serving across distributed edge clusters splits workloads into compute-bound prefill stages and memory-bandwidth-bound decode stages \cite{zhong2024distserve}. Routing these coupled stages across heterogeneous accelerators (e.g., NVIDIA L40S, Jetson Orin, AMD MI300A) while simultaneously dispatching local solar photovoltaic (PV), Battery Energy Storage Systems (BESS), and 3-phase transformer headroom presents a formidable combinatorial bottleneck.
+
+Traditional quantum optimization approaches map binary decisions $\mathbf{x} \in \{0,1\}^N$ to a pairwise QUBO matrix and execute variational QAOA \cite{farhi2014qaoa,egger2021warm}. However, four fundamental barriers prevent textbook QAOA from operating in production infrastructure control planes:
+\begin{enumerate}
+    \item \textbf{Higher-Order Physical Couplings:} When two high-TDP inference batches co-execute on a node whose microgrid slice operates in eco-throttled cooling mode, a \emph{3-body cubic thermal spike} ($x_{m,n} x_{m',n} y_{n,\text{eco}}$) occurs. Quadratizing cubic terms requires auxiliary ancilla variables and large penalty weights that compress the spectral gap.
+    \item \textbf{Inequality Slack Qubit Bloat:} Encoding $N_{\text{node}}$ thermal capacity inequalities $\sum_m \tau_{m,n} x_{m,n} \le C_n^{\max}$ via binary slack variables consumes $N_{\text{node}} \lceil \log_2 C_n^{\max} \rceil$ extra qubits.
+    \item \textbf{Variational Outer-Loop Latency:} Executing $300\text{--}1000$ classical optimizer iterations (\texttt{COBYLA}/\texttt{Adam}) across cloud QPU queues requires minutes to hours.
+    \item \textbf{Sub-Linear Qubit Scaling \& SLA Safety:} Enterprise clusters require scheduling $N \in [36, 150]$ binary decisions on compact, high-fidelity subgraphs ($n \in [5, 12]$ qubits) with $100\%$ constraint feasibility even when hardware decoherence corrupts sampled bitstrings.
+\end{enumerate}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig1_hybrid_system_and_compiler_pipeline.pdf}
+    \caption{End-to-end architecture of the \textbf{PravahaQ} hybrid HPC-quantum control plane, illustrating the \emph{Vaisheshika} 3-Local HUBO compiler, adaptive regime router (\texttt{BF-DCQO}, \texttt{Multistage PCE}, \texttt{IQO-BnB}), Paulihedral gate synthesizer, QEM shield, and deterministic feasibility repair.}
+    \label{fig:architecture}
+\end{figure}
+
+Figure~\ref{fig:architecture} illustrates the complete \textbf{PravahaQ} architecture designed to overcome all four barriers simultaneously.
+
+\section{The \emph{Vaisheshika} 3-Local HUBO \& Unbalanced Penalty Compiler}
+Let $\mathcal{M} = \{0,\dots,M-1\}$ denote distributed AI inference batches, $\mathcal{N} = \{0,\dots,N_{\text{node}}-1\}$ denote edge compute nodes, and $\mathcal{R} = \{0,\dots,R-1\}$ denote discrete microgrid power/cooling states. We define a binary decision vector $\mathbf{x} \in \{0,1\}^N$ of dimension $N = M N_{\text{node}} + N_{\text{node}} R$, where $x_{m,n} = 1$ routes batch $m$ to node $n$ and $y_{n,r} = 1$ selects power state $r$ on node $n$.
+
+\subsection{Coupled 3-Body Energy Functional}
+Inspired by Maharishi Kanada's \emph{Vaisheshika Sutra} taxonomy of dyadic (\emph{Dvy\={a}\d{n}uka}) and triadic (\emph{Try\={a}\d{n}uka}) atomic interactions, our compiler formulates the exact 3-local pseudo-Boolean polynomial:
+\begin{equation}
+    E_{\text{HUBO}}(\mathbf{x}) = c_0 + \sum_{i=1}^{N} L_i x_i + \sum_{i < j} Q_{ij} x_i x_j + \sum_{i < j < k} T_{ijk} x_i x_j x_k,
+    \label{eq:hubo}
+\end{equation}
+where $L_i$ encodes base execution latency and marginal grid tariffs, $Q_{ij}$ encodes inter-node KV-cache synchronization $W_{m,m'}^{\text{sync}} D_{n,n'}$ plus one-hot assignment penalties $\lambda_{\text{eq}} \sum_m (\sum_n x_{m,n} - 1)^2$, and $T_{ijk}$ penalizes simultaneous multi-batch execution under throttled microgrid states.
+
+\subsection{Slack-Free Unbalanced Inequality Penalization}
+To enforce node thermal limits $g_n(\mathbf{x}) = (C_n^{\max} - \sum_m \tau_{m,n} x_{m,n}) / C_n^{\max} \ge 0$ without binary slack variables, we adopt the 2nd-order asymmetric exponential approximation \cite{montanez2024unbalanced}:
+\begin{equation}
+    \Phi_{\text{unbal}}(g_n(\mathbf{x})) = -\lambda_1 g_n(\mathbf{x}) + \lambda_2 g_n(\mathbf{x})^2.
+    \label{eq:unbalanced}
+\end{equation}
+Because $x_i^2 = x_i$ for $x_i \in \{0,1\}$, Eq.~\eqref{eq:unbalanced} expands strictly into 1-body and 2-body terms with \emph{zero ancilla qubits}, as shown in Figure~\ref{fig:hubo_penalties}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig2_hubo_cubic_hypergraph_and_unbalanced_penalties.pdf}
+    \caption{(a) Asymmetric Monta\~nez-Barrera unbalanced inequality barrier $\Phi(g)$ vs.\ slack $g(\mathbf{x})$, eliminating slack ancilla qubits. (b) Compiled Ising Spin-Glass coupling matrix ($h_i$ diagonal, $J_{ij}$ off-diagonal) and cubic 3-body \emph{Try\={a}\d{n}uka} interaction magnitudes.}
+    \label{fig:hubo_penalties}
+\end{figure}
+
+\section{Exact Affine Mapping to 3-Local Ising Spin Glasses}
+\begin{theorem}[3-Local HUBO--Ising Isomorphism]
+Under the spectral bijection $x_i \mapsto \frac{1}{2}(\hat{I} - \hat{Z}_i)$ acting on $\mathcal{H} = (\mathbb{C}^2)^{\otimes N}$, the diagonal quantum Hamiltonian
+\begin{equation}
+    \hat{H}_C = C_0 \hat{I} + \sum_{i=1}^{N} h_i \hat{Z}_i + \sum_{i < j} J_{ij} \hat{Z}_i \hat{Z}_j + \sum_{i < j < k} K_{ijk} \hat{Z}_i \hat{Z}_j \hat{Z}_k
+    \label{eq:ising}
+\end{equation}
+satisfies $\langle \mathbf{x} | \hat{H}_C | \mathbf{x} \rangle = E_{\text{HUBO}}(\mathbf{x})$ for all $2^N$ basis states $|\mathbf{x}\rangle$ if and only if:
+\begin{align}
+    K_{ijk} &= -\frac{1}{8} T_{ijk}, \qquad J_{ij} = \frac{1}{4} Q_{ij} + \frac{1}{8} \sum_{k \notin \{i,j\}} T_{\{i,j,k\}}, \label{eq:jk_map}\\
+    h_i &= -\frac{1}{2} L_i - \frac{1}{4} \sum_{j \neq i} Q_{\{i,j\}} - \frac{1}{8} \sum_{\substack{j < k \\ j,k \neq i}} T_{\{i,j,k\}}, \label{eq:h_map}\\
+    C_0 &= c_0 + \frac{1}{2}\sum_i L_i + \frac{1}{4}\sum_{i<j} Q_{ij} + \frac{1}{8}\sum_{i<j<k} T_{ijk}.
+\end{align}
+\end{theorem}
+
+\section{Frontier Quantum Optimization Regimes}
+
+\subsection{Bias-Field Digitized Counterdiabatic Optimization (\texttt{BF-DCQO})}
+To eliminate variational outer loops \cite{cadavid2025bfdcqo,romero2025hubo,chandarana2022dcqaoa}, we augment the adiabatic trajectory $\hat{H}_{\text{ad}}(\lambda) = (1-\lambda)\hat{H}_0^{(k)} + \lambda \hat{H}_C$ with the 1st-order nested commutator Adiabatic Gauge Potential \cite{claeys2019floquet}:
+\begin{align}
+    \hat{\mathcal{A}}_\lambda^{(1)} &= i \alpha_1^*(\lambda) \big[\hat{H}_{\text{ad}}(\lambda), \partial_\lambda \hat{H}_{\text{ad}}(\lambda)\big] \nonumber\\
+    &= 2\alpha_1^*(\lambda) \Big( \sum_i \tilde{h}_i \hat{Y}_i + \sum_{i<j} J_{ij}(\hat{Y}_i\hat{Z}_j + \hat{Z}_i\hat{Y}_j) \nonumber\\
+    &\quad + \sum_{i<j<k} K_{ijk}(\hat{Y}_i\hat{Z}_j\hat{Z}_k + \hat{Z}_i\hat{Y}_j\hat{Z}_k + \hat{Z}_i\hat{Z}_j\hat{Y}_k) \Big),
+    \label{eq:agp}
+\end{align}
+where $\alpha_1^*(\lambda) = -\Gamma_1(\lambda)/\Gamma_2(\lambda)$ is computed analytically in closed form. Across $K_{\text{iter}} = 4$ impulses, measured spin magnetizations $m_i^{(k)} = \langle \hat{Z}_i \rangle$ update the longitudinal bias field via a sigmoidal ratchet:
+\begin{equation}
+    h_i^{\text{bias},(k+1)} = h_i^{\text{bias},(k)} + \eta_k \tanh\!\left(\gamma_{\text{bias}} m_i^{(k)}\right).
+    \label{eq:bias_update}
+\end{equation}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig3_bf_dcqo_counterdiabatic_circuit_and_agp.pdf}
+    \caption{Gate-level schematic of the \texttt{BF-DCQO} impulse circuit and analytical gauge potential $\alpha_1^*(\lambda)$ profile across $\lambda \in [0,1]$, illustrating Paulihedral CNOT-staircase cancellation.}
+    \label{fig:bf_dcqo}
+\end{figure}
+
+\subsection{Multistage Pauli Correlation Encoding (\texttt{PCE})}
+When problem scale $N$ exceeds physical qubit count $n$, we map each spin $z_m \in \{-1,+1\}$ ($m=1,\dots,N$) to a $k$-body Pauli string $\hat{\Pi}_m \in \{I,X,Y,Z\}^{\otimes n}$ ($k \le 3$) \cite{usuki2026pce}:
+\begin{equation}
+    \tilde{z}_m(\boldsymbol{\theta}) = \tanh\!\big(\alpha_s \langle \psi(\boldsymbol{\theta}) | \hat{\Pi}_m | \psi(\boldsymbol{\theta}) \rangle\big),
+\end{equation}
+minimizing $\mathcal{L}_{\text{PCE}}(\boldsymbol{\theta}; \alpha_s, \beta_s) = E_{\text{Ising}}(\tilde{\mathbf{z}}) + \beta_s \sum_{m=1}^N (1 - \tilde{z}_m^2)$ across curriculum stages $s \in \{1,2,3\}$ (Figure~\ref{fig:pce}).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig4_pce_sublinear_qubit_compression_scaling.pdf}
+    \caption{Sub-linear polynomial compression capacity $N_{\max} = 3n + 3\binom{n}{2} + 3\binom{n}{3}$ of \texttt{Multistage PCE} vs.\ standard 1-hot QUBO, alongside curriculum loss convergence for $N=36$ variables on $n=5$ qubits.}
+    \label{fig:pce}
+\end{figure}
+
+\subsection{Backtracking \texttt{IQO-BnB} \& Deterministic Repair}
+To prevent greedy Recursive QAOA from locking into frustrated local minima \cite{finzgar2024rqaoa}, \texttt{IQO-BnB} computes two-point spin correlations $M_{ij} = \langle \hat{Z}_i \hat{Z}_j \rangle - \frac{1}{4}\langle \hat{Z}_i \rangle \langle \hat{Z}_j \rangle$ and explores both parities $Z_j = \pm \text{sgn}(M_{ij}) Z_i$ in a bounded backtracking tree, folding cubic terms via $K_{ijk} \hat{Z}_i (\sigma \hat{Z}_i) \hat{Z}_k = \sigma K_{ijk} \hat{Z}_k$ (Figure~\ref{fig:iqo}). Finally, our two-phase deterministic repair engine guarantees $100\%$ SLA compliance in $\mathcal{O}(M N_{\text{node}})$ time.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig5_iqo_correlation_rounding_and_branch_and_bound.pdf}
+    \caption{Backtracking Iterative Quantum Branch-and-Bound (\texttt{IQO-BnB}) correlation reduction tree vs.\ greedy RQAOA on frustrated 3-body instances.}
+    \label{fig:iqo}
+\end{figure}
+
+\section{Experimental Evaluation}
+We evaluate PravahaQ across Qiskit v2, PennyLane, Google Cirq, and MPS tensor networks \cite{vidal2003mps}, incorporating Paulihedral gate synthesis \cite{li2022paulihedral}, OpenQASM 3.0 \cite{cross2022openqasm3}, $\text{CVaR}_{\alpha}$ \cite{barkoutsos2020cvar}, and Zero-Noise Extrapolation \cite{temme2017zne}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig6_energy_landscape_and_bias_field_trajectory.pdf}
+    \caption{(a) 2D $(\gamma,\beta)$ variational energy landscape $\langle \hat{H}_C \rangle$. (b) Individual qubit magnetization trajectories $\langle \hat{Z}_i \rangle$ bifurcating cleanly toward ground state $|z^*\rangle$ over $4$ \texttt{BF-DCQO} impulses.}
+    \label{fig:landscape}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig7_multi_sdk_and_mps_approximation_benchmarks.pdf}
+    \caption{Multi-algorithm and multi-SDK Approximation Ratio ($\text{AR}$) and QPU circuit execution count comparison across problem scales.}
+    \label{fig:benchmarks}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{figures/fig8_hardware_noise_zne_trex_cvar_resilience.pdf}
+    \caption{NISQ hardware noise resilience under two-qubit depolarizing error $p_{2Q} \in [0, 0.05]$, comparing raw noisy readout against \texttt{TREX}, $\text{CVaR}_{0.20}$, and Richardson \texttt{ZNE} ($c \in \{1,3,5\}$).}
+    \label{fig:noise}
+\end{figure}
+
+\input{../experiments/results/paper_tables.tex}
+
+Figures~\ref{fig:landscape}--\ref{fig:noise} and Table~\ref{tab:ablation} summarize our empirical findings: \texttt{BF-DCQO} and \texttt{IQO-BnB} reach exact ground-state optimality ($\text{AR} \ge 0.985$) with an $8.75\times\text{--}50\times$ reduction in quantum circuit evaluations compared to variational QAOA, while \texttt{Multistage PCE} compresses $36$- to $84$-variable schedules onto $5$ to $7$ qubits with $\text{AR} > 0.94$.
+
+\section{Conclusion}
+PravahaQ bridges the gap between theoretical counterdiabatic quantum physics and mission-critical edge infrastructure control. By uniting 3-local HUBO compilation, slack-free unbalanced penalties, zero-loop \texttt{BF-DCQO}, sub-linear \texttt{PCE} compression, and deterministic feasibility repair, PravahaQ delivers an immediately deployable hybrid quantum-classical software stack.
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}

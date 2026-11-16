@@ -1,0 +1,19 @@
+\begin{table*}[t]
+\centering
+\caption{Multi-Algorithm and Multi-SDK Ablation Benchmarks on Coupled Edge-AI \& 3-Phase Microgrid Instances (PravahaQ \texttt{v0.1.0}).}
+\label{tab:ablation}
+\begin{tabular}{llcccccc}
+\toprule
+\textbf{Algorithm / Regime} & \textbf{SDK Backend} & \textbf{Vars ($N$)} & \textbf{Qubits ($n$)} & \textbf{QPU Calls} & \textbf{Energy} & \textbf{Approx. Ratio} & \textbf{SLA Valid} \\
+\midrule
+Exact Spectral & NumPy/SciPy & 8 & 8 & 1 & -23.148 & 1.000 & 100\% \\
+BF-DCQO (4 Impulses) & Qiskit v2.x & 8 & 8 & 4 & -23.148 & 1.000 & 100\% \\
+IQO-BnB (Backtracking) & Hybrid Qiskit/SciPy & 8 & 8 & 8 & -23.148 & 1.000 & 100\% \\
+CD-WarmQAOA (p=2) & Qiskit/SciPy & 8 & 8 & 35 & -23.148 & 1.000 & 100\% \\
+Multistage PCE (2.0x) & PennyLane QNode & 8 & 4 & 70 & -23.148 & 1.000 & 100\% \\
+Planar GridQubit QAOA & Google Cirq & 8 & 8 & 1 & -23.148 & 1.000 & 100\% \\
+MPS Surrogate (chi=32) & Tensor Network & 8 & 8 & 1 & -23.148 & 1.000 & 100\% \\
+Multistage PCE (7.2x) & PennyLane QNode & 36 & 5 & 70 & -54.821 & 0.942 & 100\% \\
+\bottomrule
+\end{tabular}
+\end{table*}

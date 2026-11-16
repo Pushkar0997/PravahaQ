@@ -1,0 +1,98 @@
+{
+  "project": "PravahaQ",
+  "version": "0.1.0",
+  "compiler": "Vaisheshika-3Local",
+  "ground_energy_8q": -23.148,
+  "spectral_gap_8q": 1.4327,
+  "paulihedral_cx_saved_pct": 42.86,
+  "benchmarks": [
+    {
+      "algorithm": "Exact Spectral",
+      "sdk": "NumPy/SciPy",
+      "variables": 8,
+      "qubits": 8,
+      "qpu_calls": 1,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 0.42
+    },
+    {
+      "algorithm": "BF-DCQO (4 Impulses)",
+      "sdk": "Qiskit v2.x",
+      "variables": 8,
+      "qubits": 8,
+      "qpu_calls": 4,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 8.64
+    },
+    {
+      "algorithm": "IQO-BnB (Backtracking)",
+      "sdk": "Hybrid Qiskit/SciPy",
+      "variables": 8,
+      "qubits": 8,
+      "qpu_calls": 8,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 14.21
+    },
+    {
+      "algorithm": "CD-WarmQAOA (p=2)",
+      "sdk": "Qiskit/SciPy",
+      "variables": 8,
+      "qubits": 8,
+      "qpu_calls": 35,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 24.5
+    },
+    {
+      "algorithm": "Multistage PCE (2.0x)",
+      "sdk": "PennyLane QNode",
+      "variables": 8,
+      "qubits": 4,
+      "qpu_calls": 70,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 19.35
+    },
+    {
+      "algorithm": "Planar GridQubit QAOA",
+      "sdk": "Google Cirq",
+      "variables": 8,
+      "qubits": 8,
+      "qpu_calls": 1,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 1.12
+    },
+    {
+      "algorithm": "MPS Surrogate (chi=32)",
+      "sdk": "Tensor Network",
+      "variables": 8,
+      "qubits": 8,
+      "qpu_calls": 1,
+      "energy": -23.148,
+      "approximation_ratio": 1.0,
+      "feasible_pct": 100.0,
+      "latency_ms": 2.18
+    },
+    {
+      "algorithm": "Multistage PCE (7.2x)",
+      "sdk": "PennyLane QNode",
+      "variables": 36,
+      "qubits": 5,
+      "qpu_calls": 70,
+      "energy": -54.821,
+      "approximation_ratio": 0.942,
+      "feasible_pct": 100.0,
+      "latency_ms": 28.45
+    }
+  ]
+}

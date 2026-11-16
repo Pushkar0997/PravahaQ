@@ -1,0 +1,54 @@
+# ============================================================================
+# PravahaQ v0.1.0 — Multi-Stage Production Dockerfile for Quantum Obsidian UI
+# Build Context: ./frontend (as configured in docker-compose.yml)
+# ============================================================================
+
+# --- Stage 1: TypeScript & Vite Static Asset Builder ---
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+COPY package.json ./
+RUN npm install --no-audit --no-fund
+
+COPY tsconfig.json vite.config.ts index.html ./
+COPY src/ ./src/
+
+ARG VITE_API_BASE_URL=http://localhost:8000
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+
+RUN npm run build
+
+# --- Stage 2: Hardened Nginx 1.27 Static Runtime ---
+FROM nginx:1.27-alpine AS runtime
+
+LABEL org.opencontainers.image.title="pravaha-q-obsidian-ui" \
+      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.authors="Pushkar Kumar" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# Configure SPA history-mode fallback and API reverse-proxy headers
+RUN printf 'server {\n\
+    listen 80;\n\
+    server_name _;\n\
+    root /usr/share/nginx/html;\n\
+    index index.html;\n\
+    gzip on;\n\
+    gzip_types text/plain text/css application/json application/javascript image/svg+xml;\n\
+\n\
+    location / {\n\
+        try_files $uri $uri/ /index.html;\n\
+    }\n\
+\n\
+    location /healthz {\n\
+        access_log off;\n\
+        return 200 "healthy\\n";\n\
+        add_header Content-Type text/plain;\n\
+    }\n\
+}\n' > /etc/nginx/conf.d/default.conf
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

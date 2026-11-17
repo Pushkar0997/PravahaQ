@@ -1,4 +1,4 @@
-"""Vaisheshika 3-Body HUBO & Ising Spin-Glass Mathematical Compiler."""
+"""Vaisheshika HUBO/Ising Mathematical Compiler, Independent Validator & MILP Repair."""
 
 from pravaha_q.math_engine.feasibility_repair import (
     DecodedInfrastructureSchedule,
@@ -12,13 +12,25 @@ from pravaha_q.math_engine.unbalanced_penalties import (
     compile_unbalanced_inequality_penalty,
     evaluate_unbalanced_penalty_curve,
 )
+from pravaha_q.math_engine.validator import (
+    ConstraintViolation,
+    ScheduleValidationReport,
+    ScheduleValidator,
+    ScheduleValidity,
+    SolverStatus,
+)
 
 __all__ = [
+    "ConstraintViolation",
     "DecodedInfrastructureSchedule",
     "FeasibilityRepairEngine",
     "HUBOPolynomial",
     "InequalityConstraintSpec",
     "IsingSpinGlass",
+    "ScheduleValidationReport",
+    "ScheduleValidator",
+    "ScheduleValidity",
+    "SolverStatus",
     "SpectralReport",
     "VaisheshikaHUBOCompiler",
     "analyze_ising_spectrum",

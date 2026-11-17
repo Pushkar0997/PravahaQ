@@ -1,30 +1,55 @@
 """
-Deterministic Post-Quantum Feasibility Repair Engine (RFC-0003)
-===============================================================
-Guarantees that 100% of schedules returned by PravahaQ obey:
-  1. Single-Assignment Invariant: Every task m is routed to exactly 1 node n.
-  2. Power-State One-Hot Invariant: Every node n operates in exactly 1 power state r.
-  3. Thermal Headroom Preference: Upgrades power state or migrates tasks if a node
-     exceeds its active thermal cooling envelope.
+Constrained Minimum-Hamming-Distance Feasibility Repair Engine
+==============================================================
+Given a candidate bitstring x_hat in {0, 1}^N:
+  1. Validates x_hat via the independent `ScheduleValidator`. If already valid,
+     returns x_hat with `hamming_distance=0`.
+  2. Otherwise, solves a constrained Mixed-Integer Linear Program (`scipy.optimize.milp`)
+     subject to all hard constraints:
+       - sum_n x_{m,n} == 1                           (for all tasks m)
+       - sum_r y_{n,r} == 1                           (for all nodes n, if R > 1)
+       - sum_m q_m x_{m,n} - sum_r C_{n,r} y_{n,r} <= 0  (mode capacity envelope)
+       - x_{m,n} == 0 if latency(m, n) > deadline_m   (deadline compatibility)
+     minimizing the linear Hamming distance from the proposed assignment:
+       min  sum_{i=1}^N |x_i - x_hat_i| + eps * F_linear(x)
+     where |x_i - x_hat_i| = (1 - 2*x_hat_i)*x_i + x_hat_i.
+  3. If no feasible schedule exists within the time budget, returns explicit failure
+     (`is_feasible=False`, `solver_status=PROVEN_INFEASIBLE` or `UNKNOWN`) and
+     NEVER manufactures a success flag.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Iterable
+
+import numpy as np
+from scipy.optimize import Bounds, LinearConstraint, milp
 
 from pravaha_q.domain.problem_generator import CoupledInfrastructureProblem
 from pravaha_q.math_engine.hubo_builder import HUBOPolynomial
+from pravaha_q.math_engine.validator import (
+    ScheduleValidationReport,
+    ScheduleValidator,
+    ScheduleValidity,
+    SolverStatus,
+)
 
 
 @dataclass(frozen=True)
 class DecodedInfrastructureSchedule:
-    """Human-readable, verified schedule decoded from a quantum bitstring."""
+    """Validated schedule and repair audit record."""
 
     raw_bitstring: str
     repaired_bitstring: str
     was_repaired: bool
     is_feasible: bool
+    validity: ScheduleValidity
+    solver_status: SolverStatus
+    hamming_distance: int
+    raw_operational_cost_f: float | None
+    repaired_operational_cost_f: float | None
     raw_energy: float
     repaired_energy: float
     task_to_node: dict[int, int]
@@ -32,185 +57,227 @@ class DecodedInfrastructureSchedule:
     node_thermal_loads_watts: dict[int, float]
     node_thermal_ceilings_watts: dict[int, float]
     constraint_violations_fixed: int
+    validation_report: ScheduleValidationReport | None = None
+    repair_time_ms: float = 0.0
 
 
 class FeasibilityRepairEngine:
-    """Implements the Two-Phase Deterministic Feasibility Repair algorithm (RFC-0003)."""
+    """Constrained MILP Minimum-Hamming-Distance Repair Engine."""
 
     def __init__(
         self,
         problem: CoupledInfrastructureProblem,
-        hubo: HUBOPolynomial,
+        hubo: HUBOPolynomial | None = None,
+        time_limit_seconds: float = 0.25,
     ) -> None:
         self.problem = problem
         self.hubo = hubo
+        self.time_limit_seconds = time_limit_seconds
+        self.validator = ScheduleValidator(problem)
 
     def is_bitstring_feasible(self, bits: Iterable[int] | str) -> bool:
-        """Check if a bitstring satisfies all one-hot assignment and power state rules."""
-        x = [int(c) for c in bits] if isinstance(bits, str) else [int(b) for b in bits]
-        M = self.problem.num_tasks
-        N_node = self.problem.num_nodes
-        R = self.problem.num_power_states
-
-        for m in range(M):
-            assigned = sum(
-                x[self.problem.task_node_var_index(m, n)] for n in range(N_node)
-            )
-            if assigned != 1:
-                return False
-
-        for n in range(N_node):
-            p_assigned = sum(
-                x[self.problem.node_power_var_index(n, r)] for r in range(R)
-            )
-            if p_assigned != 1:
-                return False
-
-        return True
+        """Delegate feasibility check strictly to the independent ScheduleValidator."""
+        return self.validator.validate(bits).is_valid
 
     def repair_and_decode(
         self, raw_bits: Iterable[int] | str
     ) -> DecodedInfrastructureSchedule:
         """
-        Repair any constraint violations in O(M * N_node) time and return a
-        guaranteed-valid DecodedInfrastructureSchedule.
+        Validate `raw_bits` and, if invalid, solve the minimum-Hamming-distance
+        constrained MILP repair problem. Never manufactures a fake success flag.
         """
+        t0 = time.perf_counter()
         if isinstance(raw_bits, str):
-            x_raw = [int(c) for c in raw_bits.strip()]
+            x_hat = [int(c) for c in raw_bits.strip()]
         else:
-            x_raw = [int(b) for b in raw_bits]
+            x_hat = [int(b) for b in raw_bits]
 
-        raw_str = "".join(str(b) for b in x_raw)
-        raw_energy = self.hubo.evaluate(x_raw)
+        raw_str = "".join(str(b) for b in x_hat)
+        raw_val_report = self.validator.validate(x_hat)
+        raw_e = self.hubo.evaluate(x_hat) if self.hubo is not None else 0.0
 
-        M = self.problem.num_tasks
-        N_node = self.problem.num_nodes
-        R = self.problem.num_power_states
-
-        violations_fixed = 0
-        task_to_node: dict[int, int] = {}
-        node_loads: dict[int, float] = {n: 0.0 for n in range(N_node)}
-
-        # Phase 1A: Project each task m onto exactly one node n
-        for m, task in enumerate(self.problem.workload.tasks):
-            active_nodes = [
-                n
-                for n in range(N_node)
-                if x_raw[self.problem.task_node_var_index(m, n)] == 1
-            ]
-            if len(active_nodes) == 1:
-                chosen_n = active_nodes[0]
-            else:
-                violations_fixed += 1
-                candidates = active_nodes if len(active_nodes) > 1 else list(range(N_node))
-                # Pick node minimizing base latency + thermal congestion ratio
-                chosen_n = min(
-                    candidates,
-                    key=lambda n: (
-                        self.problem.cluster.nodes[n].base_latency_ms
-                        + 3.0
-                        * (node_loads[n] + task.thermal_load_watts)
-                        / self.problem.cluster.nodes[n].thermal_capacity_watts
-                    ),
-                )
-            task_to_node[m] = chosen_n
-            node_loads[chosen_n] += task.thermal_load_watts
-
-        # Phase 1B: Project each node n onto a valid power state r
-        node_to_power: dict[int, int] = {}
-        for n, node in enumerate(self.problem.cluster.nodes):
-            active_r = [
-                r
-                for r in range(R)
-                if x_raw[self.problem.node_power_var_index(n, r)] == 1
-            ]
-            if len(active_r) == 1:
-                chosen_r = active_r[0]
-            else:
-                violations_fixed += 1
-                chosen_r = 0
-
-            # Phase 2: Thermal headroom check — if eco state ceiling is breached, upgrade state
-            eco_ceiling = (
-                node.thermal_capacity_watts
-                * self.problem.microgrid.power_states[chosen_r].cooling_multiplier
+        # Case 1: Candidate is already physically valid!
+        if raw_val_report.is_valid:
+            elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+            return DecodedInfrastructureSchedule(
+                raw_bitstring=raw_str,
+                repaired_bitstring=raw_str,
+                was_repaired=False,
+                is_feasible=True,
+                validity=ScheduleValidity.VALID,
+                solver_status=SolverStatus.FEASIBLE_INCUMBENT,
+                hamming_distance=0,
+                raw_operational_cost_f=raw_val_report.operational_cost_f,
+                repaired_operational_cost_f=raw_val_report.operational_cost_f,
+                raw_energy=round(raw_e, 6),
+                repaired_energy=round(raw_e, 6),
+                task_to_node=raw_val_report.task_to_node,
+                node_to_power_state=raw_val_report.node_to_mode,
+                node_thermal_loads_watts=raw_val_report.node_loads_watts,
+                node_thermal_ceilings_watts=raw_val_report.node_capacities_watts,
+                constraint_violations_fixed=0,
+                validation_report=raw_val_report,
+                repair_time_ms=elapsed_ms,
             )
-            if node_loads[n] > eco_ceiling and R > 1:
-                best_r = max(
-                    range(R),
-                    key=lambda r: self.problem.microgrid.power_states[r].cooling_multiplier,
-                )
-                if best_r != chosen_r:
-                    chosen_r = best_r
-                    violations_fixed += 1
 
-            node_to_power[n] = chosen_r
+        # Case 2: Candidate is invalid -> Solve Constrained MILP Minimum-Hamming Repair
+        repaired_bits, milp_status = self._solve_milp_minimum_hamming_repair(x_hat)
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
-        # Phase 2B: Rebalance tasks if a node still breaches its maximum thermal ceiling
-        for n, node in enumerate(self.problem.cluster.nodes):
-            ceil_n = (
-                node.thermal_capacity_watts
-                * self.problem.microgrid.power_states[node_to_power[n]].cooling_multiplier
+        if repaired_bits is None:
+            return DecodedInfrastructureSchedule(
+                raw_bitstring=raw_str,
+                repaired_bitstring=raw_str,
+                was_repaired=False,
+                is_feasible=False,
+                validity=ScheduleValidity.INVALID,
+                solver_status=milp_status,
+                hamming_distance=0,
+                raw_operational_cost_f=None,
+                repaired_operational_cost_f=None,
+                raw_energy=round(raw_e, 6),
+                repaired_energy=round(raw_e, 6),
+                task_to_node=raw_val_report.task_to_node,
+                node_to_power_state=raw_val_report.node_to_mode,
+                node_thermal_loads_watts=raw_val_report.node_loads_watts,
+                node_thermal_ceilings_watts=raw_val_report.node_capacities_watts,
+                constraint_violations_fixed=0,
+                validation_report=raw_val_report,
+                repair_time_ms=elapsed_ms,
             )
-            if node_loads[n] > ceil_n and N_node > 1:
-                tasks_on_n = [m for m, assigned_n in task_to_node.items() if assigned_n == n]
-                tasks_on_n.sort(
-                    key=lambda m: self.problem.workload.tasks[m].thermal_load_watts,
-                    reverse=True,
-                )
-                for m_move in tasks_on_n:
-                    if node_loads[n] <= ceil_n:
-                        break
-                    t_heat = self.problem.workload.tasks[m_move].thermal_load_watts
-                    # Find another node with sufficient thermal slack
-                    other_nodes = [
-                        n_alt
-                        for n_alt in range(N_node)
-                        if n_alt != n
-                        and (node_loads[n_alt] + t_heat)
-                        <= (
-                            self.problem.cluster.nodes[n_alt].thermal_capacity_watts
-                            * self.problem.microgrid.power_states[
-                                node_to_power[n_alt]
-                            ].cooling_multiplier
-                        )
-                    ]
-                    if other_nodes:
-                        target_n = min(other_nodes, key=lambda na: node_loads[na])
-                        task_to_node[m_move] = target_n
-                        node_loads[n] -= t_heat
-                        node_loads[target_n] += t_heat
-                        violations_fixed += 1
 
-        # Reconstruct canonical repaired binary vector x_rep
-        x_rep = [0] * self.problem.total_binary_variables
-        for m, n in task_to_node.items():
-            x_rep[self.problem.task_node_var_index(m, n)] = 1
-        for n, r in node_to_power.items():
-            x_rep[self.problem.node_power_var_index(n, r)] = 1
-
-        rep_str = "".join(str(b) for b in x_rep)
-        rep_energy = self.hubo.evaluate(x_rep)
-        ceilings = {
-            n: round(
-                self.problem.cluster.nodes[n].thermal_capacity_watts
-                * self.problem.microgrid.power_states[node_to_power[n]].cooling_multiplier,
-                2,
-            )
-            for n in range(N_node)
-        }
-        loads_rounded = {n: round(val, 2) for n, val in node_loads.items()}
+        rep_report = self.validator.validate(repaired_bits)
+        rep_str = "".join(str(b) for b in repaired_bits)
+        rep_e = (
+            self.hubo.evaluate(repaired_bits)
+            if self.hubo is not None
+            else (rep_report.operational_cost_f or 0.0)
+        )
+        hamming = int(sum(abs(a - b) for a, b in zip(repaired_bits, x_hat)))
+        fixed_count = (
+            len(raw_val_report.violations) - len(rep_report.violations)
+            if rep_report.is_valid
+            else 0
+        )
 
         return DecodedInfrastructureSchedule(
             raw_bitstring=raw_str,
             repaired_bitstring=rep_str,
-            was_repaired=(raw_str != rep_str),
-            is_feasible=self.is_bitstring_feasible(x_rep),
-            raw_energy=round(raw_energy, 6),
-            repaired_energy=round(rep_energy, 6),
-            task_to_node=task_to_node,
-            node_to_power_state=node_to_power,
-            node_thermal_loads_watts=loads_rounded,
-            node_thermal_ceilings_watts=ceilings,
-            constraint_violations_fixed=violations_fixed,
+            was_repaired=(rep_str != raw_str and rep_report.is_valid),
+            is_feasible=rep_report.is_valid,
+            validity=rep_report.validity,
+            solver_status=(
+                SolverStatus.FEASIBLE_INCUMBENT
+                if rep_report.is_valid
+                else SolverStatus.UNKNOWN
+            ),
+            hamming_distance=hamming,
+            raw_operational_cost_f=raw_val_report.operational_cost_f,
+            repaired_operational_cost_f=rep_report.operational_cost_f,
+            raw_energy=round(raw_e, 6),
+            repaired_energy=round(rep_e, 6),
+            task_to_node=rep_report.task_to_node,
+            node_to_power_state=rep_report.node_to_mode,
+            node_thermal_loads_watts=rep_report.node_loads_watts,
+            node_thermal_ceilings_watts=rep_report.node_capacities_watts,
+            constraint_violations_fixed=max(fixed_count, 0),
+            validation_report=rep_report,
+            repair_time_ms=elapsed_ms,
         )
+
+    def _solve_milp_minimum_hamming_repair(
+        self, x_hat: list[int]
+    ) -> tuple[list[int] | None, SolverStatus]:
+        """
+        Solve:
+            min  sum_i (1 - 2 * x_hat_i) * x_i + 1e-3 * c_op^T x
+            s.t. A_eq x == b_eq,  A_ub x <= b_ub,  x in {0, 1}^N
+        """
+        N = self.problem.total_binary_variables
+        M = self.problem.num_tasks
+        N_node = self.problem.num_nodes
+        R = self.problem.num_power_states
+
+        c_obj = np.array([1.0 - 2.0 * float(b) for b in x_hat], dtype=np.float64)
+        for m, task in enumerate(self.problem.workload.tasks):
+            for n in range(N_node):
+                idx = self.problem.task_node_var_index(m, n)
+                c_obj[idx] += (
+                    1e-3
+                    * self.problem.task_execution_latency_ms(m, n)
+                    * task.priority_weight
+                )
+
+        if self.problem.has_mode_variables:
+            for n in range(N_node):
+                for r, pstate in enumerate(self.problem.microgrid.power_states):
+                    idx = self.problem.node_power_var_index(n, r)
+                    c_obj[idx] += 1e-3 * pstate.energy_cost_tariff
+
+        rows: list[np.ndarray] = []
+        lbs: list[float] = []
+        ubs: list[float] = []
+
+        # 1. Task single-assignment equality: sum_n x_{m,n} == 1
+        for m in range(M):
+            row = np.zeros(N, dtype=np.float64)
+            for n in range(N_node):
+                row[self.problem.task_node_var_index(m, n)] = 1.0
+            rows.append(row)
+            lbs.append(1.0)
+            ubs.append(1.0)
+
+        # 2. Node mode selection equality: sum_r y_{n,r} == 1 (when R > 1)
+        if self.problem.has_mode_variables:
+            for n in range(N_node):
+                row = np.zeros(N, dtype=np.float64)
+                for r in range(R):
+                    row[self.problem.node_power_var_index(n, r)] = 1.0
+                rows.append(row)
+                lbs.append(1.0)
+                ubs.append(1.0)
+
+        # 3. Mode-dependent capacity inequality: sum_m q_m x_{m,n} - sum_r C_{n,r} y_{n,r} <= 0
+        for n in range(N_node):
+            row = np.zeros(N, dtype=np.float64)
+            for m, task in enumerate(self.problem.workload.tasks):
+                row[self.problem.task_node_var_index(m, n)] = task.thermal_load_watts
+            if self.problem.has_mode_variables:
+                for r in range(R):
+                    row[self.problem.node_power_var_index(n, r)] = (
+                        -self.problem.node_mode_capacity(n, r)
+                    )
+                rows.append(row)
+                lbs.append(-np.inf)
+                ubs.append(0.0)
+            else:
+                rows.append(row)
+                lbs.append(-np.inf)
+                ubs.append(self.problem.node_mode_capacity(n, 0))
+
+        # 4. Variable bounds (forbid task-node pairs that violate latency deadlines)
+        var_ub = np.ones(N, dtype=np.float64)
+        for m, task in enumerate(self.problem.workload.tasks):
+            for n in range(N_node):
+                if self.problem.task_execution_latency_ms(m, n) > task.deadline_ms + 1e-6:
+                    var_ub[self.problem.task_node_var_index(m, n)] = 0.0
+
+        A_mat = np.vstack(rows)
+        constraints = LinearConstraint(A_mat, lbs, ubs)
+        integrality = np.ones(N, dtype=np.float64)
+        bounds = Bounds(np.zeros(N, dtype=np.float64), var_ub)
+
+        res = milp(
+            c=c_obj,
+            integrality=integrality,
+            bounds=bounds,
+            constraints=constraints,
+            options={"time_limit": self.time_limit_seconds},
+        )
+
+        if res.success and res.x is not None:
+            bits = [int(round(float(v))) for v in res.x]
+            return bits, SolverStatus.FEASIBLE_INCUMBENT
+        if res.status == 2:
+            return None, SolverStatus.PROVEN_INFEASIBLE
+        return None, SolverStatus.UNKNOWN

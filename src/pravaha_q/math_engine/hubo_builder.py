@@ -1,8 +1,14 @@
 """
-Vaisheshika 3-Local HUBO (Higher-Order Unconstrained Binary Optimization) Compiler
-==================================================================================
-Constructs the coupled 1-body, 2-body quadratic, and 3-body cubic energy polynomial:
-    E_HUBO(x) = c_0 + sum_i L_i x_i + sum_{i<j} Q_{ij} x_i x_j + sum_{i<j<k} T_{ijk} x_i x_j x_k
+Vaisheshika QUBO / HUBO Compiler
+================================
+Compiles CoupledInfrastructureProblem into the penalized surrogate polynomial:
+    E(x) = F(x) + Phi_penalties(x)
+where:
+  - F(x) is the true operational cost (latency + KV sync + mode tariff).
+  - Mode-dependent capacity g_n(x, y) = sum_r C_{n,r} y_{n,r} - sum_m q_m x_{m,n} >= 0
+    is linear in the binary variables and encoded via 2-body unbalanced penalization.
+  - Cubic 3-body terms are disabled by default (`enable_cubic_terms=False`) and only
+    included when explicitly studying higher-order co-residency interference.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from pravaha_q.math_engine.unbalanced_penalties import (
 class HUBOPolynomial:
     """
     Canonical up-to-3-body pseudo-Boolean polynomial over x in {0, 1}^N.
-    Enforces RFC-0001 strict ascending index invariants: i < j and i < j < k.
+    Enforces strict ascending index invariants: i < j and i < j < k.
     """
 
     num_variables: int
@@ -47,7 +53,6 @@ class HUBOPolynomial:
         self._check_idx(i)
         self._check_idx(j)
         if i == j:
-            # Since x_i in {0, 1}, x_i^2 == x_i
             self.add_linear(i, val)
             return
         pair = (min(i, j), max(i, j))
@@ -69,7 +74,7 @@ class HUBOPolynomial:
                 self.cubic[triad] = self.cubic.get(triad, 0.0) + float(val)
 
     def evaluate(self, bitstring: Iterable[int] | np.ndarray | str) -> float:
-        """Evaluate exact HUBO energy E_HUBO(x) for a binary vector x in {0, 1}^N."""
+        """Evaluate penalized surrogate energy E(x) = F(x) + penalties."""
         x = self._parse_bitstring(bitstring)
         energy = float(self.constant_offset)
         for i, coeff in self.linear.items():
@@ -84,7 +89,6 @@ class HUBOPolynomial:
         return energy
 
     def to_qubo_matrix(self) -> np.ndarray:
-        """Return the N x N upper-triangular 2-body QUBO projection matrix."""
         q_mat = np.zeros((self.num_variables, self.num_variables), dtype=np.float64)
         for i, val in self.linear.items():
             q_mat[i, i] = val
@@ -112,21 +116,19 @@ class HUBOPolynomial:
 
 class VaisheshikaHUBOCompiler:
     """
-    Compiles a CoupledInfrastructureProblem into a 3-Local HUBOPolynomial.
-    Named after Maharishi Kanada's Vaisheshika Sutra theory of 2-body (Dvyanuka)
-    and 3-body (Tryanuka) interactions.
+    Compiles a CoupledInfrastructureProblem into a QUBO (default) or 3-Local HUBO
+    (when `enable_cubic_terms=True` is explicitly requested).
     """
 
     def __init__(
         self,
         penalty_config: UnbalancedPenaltyConfig | None = None,
-        enable_cubic_terms: bool = True,
+        enable_cubic_terms: bool = False,
     ) -> None:
         self.penalty_config = penalty_config or UnbalancedPenaltyConfig()
         self.enable_cubic_terms = enable_cubic_terms
 
     def compile(self, problem: CoupledInfrastructureProblem) -> HUBOPolynomial:
-        """Build the complete HUBOPolynomial for a coupled infrastructure instance."""
         hubo = HUBOPolynomial(
             num_variables=problem.total_binary_variables,
             variable_labels=problem.variable_labels(),
@@ -135,40 +137,42 @@ class VaisheshikaHUBOCompiler:
         M = problem.num_tasks
         N_node = problem.num_nodes
         R = problem.num_power_states
+        lam_eq = self.penalty_config.equality_weight
 
-        # 1. Linear Objective: Base task-node execution latency & priority
+        # 1. Operational Objective F(x): Task execution latency + deadline violation penalty
         for m, task in enumerate(problem.workload.tasks):
-            for n, node in enumerate(problem.cluster.nodes):
+            for n in range(N_node):
                 idx = problem.task_node_var_index(m, n)
-                cost = (
-                    node.base_latency_ms
-                    * (task.compute_flops_giga / 50.0)
-                    * task.priority_weight
-                )
+                exec_lat = problem.task_execution_latency_ms(m, n)
+                cost = exec_lat * task.priority_weight
+                if exec_lat > task.deadline_ms:
+                    cost += 2.0 * lam_eq
                 hubo.add_linear(idx, cost)
 
-        # 2. Linear Objective: Microgrid power dispatch state tariff
-        for n in range(N_node):
-            for r, pstate in enumerate(problem.microgrid.power_states):
-                idx = problem.node_power_var_index(n, r)
-                hubo.add_linear(idx, pstate.energy_cost_tariff)
+        # 2. Operational Objective F(x): Mode tariff cost
+        if problem.has_mode_variables:
+            for n in range(N_node):
+                for r, pstate in enumerate(problem.microgrid.power_states):
+                    idx = problem.node_power_var_index(n, r)
+                    hubo.add_linear(idx, pstate.energy_cost_tariff)
+        else:
+            # R == 1: y_{n,0} = 1 is fixed; add constant tariff offset
+            hubo.add_constant(N_node * problem.microgrid.power_states[0].energy_cost_tariff)
 
-        # 3. Quadratic Objective: Inter-node KV-cache synchronization overhead
+        # 3. Operational Objective F(x): Inter-node KV-cache synchronization overhead
         for m1 in range(M):
             for m2 in range(m1 + 1, M):
                 w_sync = problem.workload.sync_coupling(m1, m2)
-                if w_sync > 0:
+                if w_sync > 0.0:
                     for n1 in range(N_node):
                         for n2 in range(N_node):
                             dist = problem.cluster.distance(n1, n2)
-                            if dist > 0:
+                            if dist > 0.0:
                                 i = problem.task_node_var_index(m1, n1)
                                 j = problem.task_node_var_index(m2, n2)
                                 hubo.add_quadratic(i, j, w_sync * dist)
 
-        # 4. Equality Constraints: Each task m assigned to exactly 1 node
-        #    lambda_eq * (sum_n x_{m,n} - 1)^2 = lambda_eq * (1 - sum_n x_{m,n} + 2 sum_{n1<n2} x_{m,n1} x_{m,n2})
-        lam_eq = self.penalty_config.equality_weight
+        # 4. Hard Equality Penalty: sum_n x_{m,n} == 1 for all m
         for m in range(M):
             hubo.add_constant(lam_eq)
             for n1 in range(N_node):
@@ -178,8 +182,8 @@ class VaisheshikaHUBOCompiler:
                     j = problem.task_node_var_index(m, n2)
                     hubo.add_quadratic(i, j, 2.0 * lam_eq)
 
-        # 5. Equality Constraints: Each node n operates in exactly 1 power state r
-        if R > 1:
+        # 5. Hard Equality Penalty: sum_r y_{n,r} == 1 for all n (only when R > 1)
+        if problem.has_mode_variables:
             for n in range(N_node):
                 hubo.add_constant(lam_eq)
                 for r1 in range(R):
@@ -189,16 +193,32 @@ class VaisheshikaHUBOCompiler:
                         j = problem.node_power_var_index(n, r2)
                         hubo.add_quadratic(i, j, 2.0 * lam_eq)
 
-        # 6. Slack-Free Unbalanced Inequality Penalties for Node Thermal Capacity
-        for n, node in enumerate(problem.cluster.nodes):
-            var_indices = tuple(problem.task_node_var_index(m, n) for m in range(M))
-            weights = tuple(t.thermal_load_watts for t in problem.workload.tasks)
-            spec = InequalityConstraintSpec(
-                name=f"ThermalCap_Node_{n}",
-                var_indices=var_indices,
-                weights=weights,
-                capacity=node.thermal_capacity_watts,
-            )
+        # 6. Linear Mode-Dependent Capacity Inequality Penalty:
+        #    sum_m q_m x_{m,n} - sum_r C_{n,r} y_{n,r} <= 0
+        for n in range(N_node):
+            if problem.has_mode_variables:
+                # Write as: C_{n,max} - [ sum_m q_m x_{m,n} + sum_r (C_{n,max} - C_{n,r}) y_{n,r} ] >= 0
+                c_max = max(problem.node_mode_capacity(n, r) for r in range(R))
+                var_indices = [problem.task_node_var_index(m, n) for m in range(M)] + [
+                    problem.node_power_var_index(n, r) for r in range(R)
+                ]
+                weights = [t.thermal_load_watts for t in problem.workload.tasks] + [
+                    c_max - problem.node_mode_capacity(n, r) for r in range(R)
+                ]
+                spec = InequalityConstraintSpec(
+                    name=f"ModeCapacity_Node_{n}",
+                    var_indices=tuple(var_indices),
+                    weights=tuple(weights),
+                    capacity=c_max,
+                )
+            else:
+                spec = InequalityConstraintSpec(
+                    name=f"Capacity_Node_{n}",
+                    var_indices=tuple(problem.task_node_var_index(m, n) for m in range(M)),
+                    weights=tuple(t.thermal_load_watts for t in problem.workload.tasks),
+                    capacity=problem.node_mode_capacity(n, 0),
+                )
+
             c_off, lin_map, quad_map = compile_unbalanced_inequality_penalty(
                 spec,
                 lambda1=self.penalty_config.lambda1_linear,
@@ -210,31 +230,28 @@ class VaisheshikaHUBOCompiler:
             for (i, j), val in quad_map.items():
                 hubo.add_quadratic(i, j, val)
 
-        # 7. Vaisheshika 3-Body Cubic Terms (T_{ijk} * x_i * x_j * x_k):
-        #    Penalize simultaneous co-execution of two heavy tasks on a node while
-        #    that node's microgrid slice is in Eco-Throttled cooling state!
-        if self.enable_cubic_terms and R >= 1:
-            for n, node in enumerate(problem.cluster.nodes):
+        # 7. Optional Higher-Order Co-Residency Interference (Only when enable_cubic_terms=True)
+        if self.enable_cubic_terms and problem.has_mode_variables:
+            for n in range(N_node):
                 for r, pstate in enumerate(problem.microgrid.power_states):
                     if pstate.is_eco_throttled:
                         idx_power = problem.node_power_var_index(n, r)
+                        cap_nr = problem.node_mode_capacity(n, r)
                         for m1 in range(M):
                             for m2 in range(m1 + 1, M):
-                                combined_heat = (
+                                combined_load = (
                                     problem.workload.tasks[m1].thermal_load_watts
                                     + problem.workload.tasks[m2].thermal_load_watts
                                 )
-                                eco_ceiling = (
-                                    node.thermal_capacity_watts * pstate.cooling_multiplier
-                                )
-                                if combined_heat > 0.85 * eco_ceiling:
+                                if combined_load > 0.85 * cap_nr:
                                     idx_t1 = problem.task_node_var_index(m1, n)
                                     idx_t2 = problem.task_node_var_index(m2, n)
-                                    overload_ratio = combined_heat / max(eco_ceiling, 1.0)
-                                    cubic_penalty = (
-                                        problem.microgrid.phase_overload_penalty
-                                        * overload_ratio
+                                    ratio = combined_load / max(cap_nr, 1.0)
+                                    hubo.add_cubic(
+                                        idx_t1,
+                                        idx_t2,
+                                        idx_power,
+                                        problem.microgrid.phase_overload_penalty * ratio,
                                     )
-                                    hubo.add_cubic(idx_t1, idx_t2, idx_power, cubic_penalty)
 
         return hubo

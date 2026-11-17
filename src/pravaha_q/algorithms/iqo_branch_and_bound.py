@@ -1,17 +1,9 @@
 """
 Backtracking Iterative Quantum Branch-and-Bound (IQO-BnB)
 =========================================================
-Replaces greedy Recursive QAOA (RQAOA) with a backtracking correlation-rounding
-branch-and-bound tree on 3-local Ising Spin Glasses:
-  1. Executes a shallow counterdiabatic circuit on the active N-qubit graph.
-  2. Computes connected two-point spin correlations:
-         M_{ij} = <Z_i Z_j> - <Z_i><Z_j>
-  3. Branches on the highest-magnitude pair (i*, j*) with both parities:
-       - Primary Branch:   Z_{j*} = +sgn(M_{i*, j*}) * Z_{i*}
-       - Backtrack Branch: Z_{j*} = -sgn(M_{i*, j*}) * Z_{i*}
-  4. Algebraically eliminates qubit j* from 1-body, 2-body, and 3-body cubic
-     terms (reducing cubic K_{i*, j*, k} Z_{i*} Z_{j*} Z_k -> sigma K_{i*, j*, k} Z_k!).
-  5. Solves the reduced core exactly once N <= classical_cutoff_vars.
+Uses the exact connected two-point spin covariance:
+    Cov(Z_i, Z_j) = <Z_i Z_j> - <Z_i><Z_j>
+which is identically zero for any unentangled product state |psi> = bigotimes_q |phi_q>.
 """
 
 from __future__ import annotations
@@ -50,6 +42,61 @@ class IQOBranchAndBoundResult:
     reduction_trace: list[IQOReductionStep] = field(default_factory=list)
 
 
+def compute_connected_covariance_matrix(
+    probs: np.ndarray, num_qubits: int
+) -> np.ndarray:
+    """
+    Compute the exact N x N connected spin covariance matrix:
+        Cov(Z_i, Z_j) = <Z_i Z_j> - <Z_i><Z_j>
+    For any product state |psi> = bigotimes_q |phi_q>, all off-diagonal entries
+    Cov(Z_i, Z_j) (i != j) are identically 0.0.
+    """
+    n = num_qubits
+    dim = 1 << n
+    indices = np.arange(dim, dtype=np.uint32)
+    spins = np.empty((n, dim), dtype=np.float64)
+    for q in range(n):
+        bit = (indices >> (n - 1 - q)) & 1
+        spins[q] = 1.0 - 2.0 * bit
+
+    mags = np.sum(probs * spins, axis=1)
+    cov = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        cov[i, i] = 1.0 - float(mags[i] ** 2)
+        for j in range(i + 1, n):
+            zz_exp = float(np.sum(probs * spins[i] * spins[j]))
+            c_ij = zz_exp - float(mags[i] * mags[j])
+            cov[i, j] = c_ij
+            cov[j, i] = c_ij
+    return cov
+
+
+def compute_strongest_spin_correlator(
+    probs: np.ndarray, ising: IsingSpinGlass
+) -> tuple[int, int, float]:
+    """
+    Find qubit pair (i, j) with i < j maximizing |Cov(Z_i, Z_j)| = |<Z_i Z_j> - <Z_i><Z_j>|.
+    """
+    n = ising.num_qubits
+    cov = compute_connected_covariance_matrix(probs, n)
+
+    best_pair = (0, 1)
+    best_score = -1.0
+    best_cov = 0.0
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            c_ij = float(cov[i, j])
+            has_edge = 1.15 if (i, j) in ising.j_quadratic else 1.0
+            score = abs(c_ij) * has_edge
+            if score > best_score:
+                best_score = score
+                best_pair = (i, j)
+                best_cov = c_ij
+
+    return best_pair[0], best_pair[1], best_cov
+
+
 class IQOBranchAndBoundSolver:
     """Executes Backtracking Iterative Quantum Optimization (IQO-BnB)."""
 
@@ -69,7 +116,6 @@ class IQOBranchAndBoundSolver:
         )
 
     def solve(self, ising: IsingSpinGlass) -> IQOBranchAndBoundResult:
-        """Run IQO-BnB variable reduction with backtracking search."""
         active_qubits = list(range(ising.num_qubits))
         branches_explored = 0
         best_energy = float("inf")
@@ -97,7 +143,6 @@ class IQOBranchAndBoundSolver:
                     qubit_map[idx]: (1 - 2 * int(b))
                     for idx, b in enumerate(core_bits)
                 }
-                # Reconstruct eliminated variables in reverse elimination order
                 for elim_q, ref_q, sigma in reversed(substitutions):
                     core_spins[elim_q] = int(sigma * core_spins[ref_q])
 
@@ -113,20 +158,18 @@ class IQOBranchAndBoundSolver:
                     best_trace = list(trace)
                 return
 
-            # Run shallow quantum impulse to extract connected 2-point correlators
             bf_res = self._bf_engine.run(sub_ising)
             state_probs = self._reconstruct_prob_vector(
                 bf_res.statevector_probabilities, n_curr
             )
-            i_local, j_local, corr_val = compute_strongest_spin_correlator(
+            i_local, j_local, cov_val = compute_strongest_spin_correlator(
                 state_probs, sub_ising
             )
-            primary_sigma = 1 if corr_val >= 0.0 else -1
+            primary_sigma = 1 if cov_val >= 0.0 else -1
 
             orig_i = qubit_map[i_local]
             orig_j = qubit_map[j_local]
 
-            # 1. Explore Primary Correlation Branch: Z_j = primary_sigma * Z_i
             red_primary, new_map = reduce_ising_spin_pair(
                 sub_ising, qubit_map, i_local, j_local, primary_sigma
             )
@@ -135,7 +178,7 @@ class IQOBranchAndBoundSolver:
                 eliminated_qubit=orig_j,
                 reference_qubit=orig_i,
                 parity_sign=primary_sigma,
-                correlation_magnitude=round(abs(corr_val), 5),
+                correlation_magnitude=round(abs(cov_val), 5),
                 is_backtrack_branch=False,
             )
             explore(
@@ -147,7 +190,6 @@ class IQOBranchAndBoundSolver:
                 is_greedy_path,
             )
 
-            # 2. Explore Backtrack Branch if within backtrack budget
             if backtracks_used < self.max_backtrack_depth:
                 opp_sigma = -primary_sigma
                 red_bt, new_map_bt = reduce_ising_spin_pair(
@@ -158,7 +200,7 @@ class IQOBranchAndBoundSolver:
                     eliminated_qubit=orig_j,
                     reference_qubit=orig_i,
                     parity_sign=opp_sigma,
-                    correlation_magnitude=round(abs(corr_val), 5),
+                    correlation_magnitude=round(abs(cov_val), 5),
                     is_backtrack_branch=True,
                 )
                 explore(
@@ -205,38 +247,6 @@ class IQOBranchAndBoundSolver:
         return vec / np.sum(vec)
 
 
-def compute_strongest_spin_correlator(
-    probs: np.ndarray, ising: IsingSpinGlass
-) -> tuple[int, int, float]:
-    """Find qubit pair (i, j) with i < j maximizing |<Z_i Z_j> - 0.25 <Z_i><Z_j>|."""
-    n = ising.num_qubits
-    dim = 1 << n
-    indices = np.arange(dim, dtype=np.uint32)
-    spins = np.empty((n, dim), dtype=np.float64)
-    for q in range(n):
-        bit = (indices >> (n - 1 - q)) & 1
-        spins[q] = 1.0 - 2.0 * bit
-
-    mags = np.sum(probs * spins, axis=1)
-    best_pair = (0, 1)
-    best_score = -1.0
-    best_corr = 0.0
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            zz_exp = float(np.sum(probs * spins[i] * spins[j]))
-            conn = zz_exp - 0.25 * float(mags[i] * mags[j])
-            # Weight slightly by direct coupling presence so graph remains connected
-            has_edge = 1.15 if (i, j) in ising.j_quadratic else 1.0
-            score = abs(conn) * has_edge
-            if score > best_score:
-                best_score = score
-                best_pair = (i, j)
-                best_corr = zz_exp
-
-    return best_pair[0], best_pair[1], best_corr
-
-
 def reduce_ising_spin_pair(
     ising: IsingSpinGlass,
     qubit_map: list[int],
@@ -244,10 +254,7 @@ def reduce_ising_spin_pair(
     j_elim: int,
     sigma: int,
 ) -> tuple[IsingSpinGlass, list[int]]:
-    """
-    Substitute Z_{j_elim} = sigma * Z_{i_keep} (sigma in {+1, -1}) across all
-    1-body, 2-body, and 3-body cubic terms and re-index to (N - 1) qubits.
-    """
+    """Substitute Z_{j_elim} = sigma * Z_{i_keep} across 1-body, 2-body, and 3-body terms."""
     n = ising.num_qubits
     new_map = [qubit_map[q] for q in range(n) if q != j_elim]
 
@@ -260,16 +267,13 @@ def reduce_ising_spin_pair(
     j_new: dict[tuple[int, int], float] = {}
     k_new: dict[tuple[int, int, int], float] = {}
 
-    # 1. Fold 1-body terms
     for q, val in ising.h_linear.items():
         mult = sigma if q == j_elim else 1
         rq = remap(q)
         h_new[rq] = h_new.get(rq, 0.0) + mult * val
 
-    # 2. Fold 2-body terms
     for (u, v), val in ising.j_quadratic.items():
-        if u == i_keep and v == j_elim or u == j_elim and v == i_keep:
-            # Z_i * (sigma Z_i) == sigma * I
+        if (u == i_keep and v == j_elim) or (u == j_elim and v == i_keep):
             c0 += sigma * val
         else:
             mult = sigma if (u == j_elim or v == j_elim) else 1
@@ -277,11 +281,9 @@ def reduce_ising_spin_pair(
             pair = (min(ru, rv), max(ru, rv))
             j_new[pair] = j_new.get(pair, 0.0) + mult * val
 
-    # 3. Fold 3-body cubic terms
     for (u, v, w), val in ising.k_cubic.items():
         triad_set = {u, v, w}
         if i_keep in triad_set and j_elim in triad_set:
-            # Z_i * Z_j * Z_other == sigma * Z_other (reduces 3-body to 1-body!)
             other = next(x for x in (u, v, w) if x not in (i_keep, j_elim))
             ro = remap(other)
             h_new[ro] = h_new.get(ro, 0.0) + sigma * val

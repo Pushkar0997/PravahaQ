@@ -7,12 +7,8 @@ correlator Pi_m in {I, X, Y, Z}^{otimes n}:
 
     z_tilde_m(theta) = tanh(alpha_s * <psi(theta)| Pi_m |psi(theta)>)
 
-Optimizes a hardware-efficient brickwall variational circuit across a multistage
-(alpha_s, beta_s) annealing curriculum to prevent premature vanishing gradients.
-
-Reference:
-  Usuki, S., et al. (2026). "Multistage Pauli Correlation Encoding for Scalable
-  Quantum Optimization." arXiv:2609.10665.
+Includes `evaluate_pauli_string_matrix_oracle` for exact verification against
+explicit 2^n x 2^n Kronecker matrix multiplication.
 """
 
 from __future__ import annotations
@@ -25,6 +21,13 @@ from scipy.optimize import minimize
 
 from pravaha_q.domain.exceptions import QubitCompressionCapacityError
 from pravaha_q.math_engine.ising_spin_glass import IsingSpinGlass
+
+_PAULI_MATRICES: dict[str, np.ndarray] = {
+    "I": np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.complex128),
+    "X": np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128),
+    "Y": np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128),
+    "Z": np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128),
+}
 
 
 @dataclass(frozen=True)
@@ -60,16 +63,9 @@ def generate_pauli_correlator_basis(
     """
     Generate `num_variables` distinct k-body Pauli observables (1 <= k <= max_body_k)
     over `num_qubits` physical qubits.
-
-    Capacity for n qubits:
-      - k=1: 3 * n
-      - k=2: 3 * C(n, 2) homogeneous (ZZ, XX, YY) + mixed
-      - k=3: 3 * C(n, 3) homogeneous (ZZZ, XXX, YYY)
-    For n=7 qubits, homogeneous k in {1,2,3} alone provides 21 + 63 + 105 = 189 variables.
     """
     basis: list[tuple[tuple[int, str], ...]] = []
 
-    # Prioritize k=2 and k=3 homogeneous correlators (ZZ, XX, YY, ZZZ, XXX, YYY)
     for k in range(2, max_body_k + 1):
         for pauli_char in ("Z", "X", "Y"):
             for sites in combinations(range(num_qubits), k):
@@ -77,16 +73,21 @@ def generate_pauli_correlator_basis(
                 if len(basis) >= num_variables:
                     return basis
 
-    # Add k=1 single-qubit observables if needed
     for pauli_char in ("Z", "X", "Y"):
         for q in range(num_qubits):
             basis.append(((q, pauli_char),))
             if len(basis) >= num_variables:
                 return basis
 
-    # Add mixed ZX / ZY 2-body correlators if still needed
     for q1, q2 in combinations(range(num_qubits), 2):
-        for p1, p2 in (("Z", "X"), ("X", "Z"), ("Z", "Y"), ("Y", "Z")):
+        for p1, p2 in (
+            ("Z", "X"),
+            ("X", "Z"),
+            ("Z", "Y"),
+            ("Y", "Z"),
+            ("X", "Y"),
+            ("Y", "X"),
+        ):
             basis.append(((q1, p1), (q2, p2)))
             if len(basis) >= num_variables:
                 return basis
@@ -105,6 +106,28 @@ def format_correlator_string(
     for q, p in correlator:
         chars[q] = p
     return "".join(chars)
+
+
+def evaluate_pauli_string_matrix_oracle(
+    state: np.ndarray,
+    correlator: tuple[tuple[int, str], ...] | str,
+    num_qubits: int,
+) -> float:
+    """
+    Reference Matrix Oracle: Compute <psi| P |psi> by constructing the explicit
+    2^n x 2^n Kronecker product matrix P = bigotimes_{q=0}^{n-1} sigma_{q}.
+    """
+    if isinstance(correlator, str):
+        pauli_str = correlator
+    else:
+        pauli_str = format_correlator_string(correlator, num_qubits)
+
+    op_mat = _PAULI_MATRICES[pauli_str[0]]
+    for ch in pauli_str[1:]:
+        op_mat = np.kron(op_mat, _PAULI_MATRICES[ch])
+
+    exp_val = np.vdot(state, op_mat @ state)
+    return float(np.real(exp_val))
 
 
 class MultistagePCEEncoder:
@@ -139,7 +162,6 @@ class MultistagePCEEncoder:
             num_qubits=n, num_variables=N, max_body_k=self.max_body_k
         )
 
-        # Precompute bit-flip and phase masks for fast expectation <psi| Pi_m |psi>
         masks = [self._compile_pauli_mask(corr, n) for corr in correlators]
 
         num_params = 2 * n * self.ansatz_layers
@@ -171,17 +193,14 @@ class MultistagePCEEncoder:
             )
             theta = res.x
 
-        # Final readout and sign projection z_m* = sgn(<Pi_m>)
         final_state = self._simulate_brickwall_ansatz(theta, n, self.ansatz_layers)
         final_exps = self._evaluate_all_correlators(final_state, masks)
 
-        # Evaluate primary sign projection + top single-variable local flips
         spins_hard = [1 if val >= 0.0 else -1 for val in final_exps]
         bits_hard = [(1 - s) // 2 for s in spins_hard]
         best_bits = list(bits_hard)
         best_energy = ising.evaluate_bitstring(best_bits)
 
-        # Polish uncertain correlators (smallest |<Pi_m>|)
         uncertainty_order = np.argsort(np.abs(final_exps))[: min(N, 12)]
         for idx in uncertainty_order:
             candidate = list(best_bits)
@@ -210,17 +229,13 @@ class MultistagePCEEncoder:
     def _simulate_brickwall_ansatz(
         params: np.ndarray, num_qubits: int, layers: int
     ) -> np.ndarray:
-        """
-        Simulate a hardware-efficient Ry-Rz + CNOT brickwall ansatz on n qubits
-        using tensor-axis contractions in O(layers * n * 2^n) time.
-        """
+        """Simulate a hardware-efficient Ry-Rz + CNOT brickwall ansatz on n qubits."""
         state = np.zeros(1 << num_qubits, dtype=np.complex128)
         state[0] = 1.0 + 0.0j
         psi = state.reshape((2,) * num_qubits)
 
         p_idx = 0
         for layer in range(layers):
-            # Single-qubit Ry and Rz rotations
             for q in range(num_qubits):
                 ry_angle = float(params[p_idx])
                 rz_angle = float(params[p_idx + 1])
@@ -239,7 +254,6 @@ class MultistagePCEEncoder:
                 shape[q] = 2
                 psi = psi * rz_vec.reshape(shape)
 
-            # Entangling CNOT ring
             offset = layer % 2
             for q in range(offset, num_qubits - 1, 2):
                 psi = _apply_cnot_tensor(psi, q, q + 1, num_qubits)
@@ -252,7 +266,14 @@ class MultistagePCEEncoder:
     def _compile_pauli_mask(
         correlator: tuple[tuple[int, str], ...], num_qubits: int
     ) -> tuple[int, np.ndarray]:
-        """Precompute bit-flip mask and phase vector for fast <psi| Pi_m |psi>."""
+        """
+        Precompute bit-flip mask and exact row phase vector for <psi| Pi_m |psi>.
+        For row index x (where (Pi_m |psi>)_x = phase[x] * psi_{x ^ flip_mask}):
+          - Z: <x_q| Z |x_q> = +1 if x_q == 0 else -1
+          - X: <x_q| X |x_q ^ 1> = +1
+          - Y: <0| Y |1> = -i  (when row bit x_q == 0)
+               <1| Y |0> = +i  (when row bit x_q == 1)
+        """
         dim = 1 << num_qubits
         indices = np.arange(dim, dtype=np.uint32)
         flip_mask = 0
@@ -260,14 +281,14 @@ class MultistagePCEEncoder:
 
         for q, p in correlator:
             bit_pos = num_qubits - 1 - q
-            bit_val = (indices >> bit_pos) & 1
+            row_bit = (indices >> bit_pos) & 1
             if p == "Z":
-                phase *= np.where(bit_val == 0, 1.0, -1.0)
+                phase *= np.where(row_bit == 0, 1.0, -1.0)
             elif p == "X":
                 flip_mask |= 1 << bit_pos
             elif p == "Y":
                 flip_mask |= 1 << bit_pos
-                phase *= np.where(bit_val == 0, 1.0j, -1.0j)
+                phase *= np.where(row_bit == 0, -1.0j, 1.0j)
 
         return flip_mask, phase
 
@@ -275,22 +296,18 @@ class MultistagePCEEncoder:
     def _evaluate_all_correlators(
         state: np.ndarray, masks: list[tuple[int, np.ndarray]]
     ) -> np.ndarray:
-        """Compute <psi| Pi_m |psi> for all m in 1..N."""
+        """Compute exact <psi| Pi_m |psi> for all m in 1..N."""
         dim = state.shape[0]
         indices = np.arange(dim, dtype=np.uint32)
         conj_state = np.conj(state)
         out = np.empty(len(masks), dtype=np.float64)
         for m_idx, (flip_mask, phase) in enumerate(masks):
-            if flip_mask == 0:
-                out[m_idx] = float(np.real(np.sum(conj_state * phase * state)))
-            else:
-                permuted = state[indices ^ flip_mask]
-                out[m_idx] = float(np.real(np.sum(conj_state * phase * permuted)))
+            ket_acted = phase * (state if flip_mask == 0 else state[indices ^ flip_mask])
+            out[m_idx] = float(np.real(np.sum(conj_state * ket_acted)))
         return out
 
     @staticmethod
     def _evaluate_relaxed_ising(ising: IsingSpinGlass, z_tilde: np.ndarray) -> float:
-        """Evaluate relaxed continuous Ising energy E(z_tilde)."""
         e = float(ising.constant_offset)
         for i, h_val in ising.h_linear.items():
             e += h_val * float(z_tilde[i])
@@ -304,7 +321,6 @@ class MultistagePCEEncoder:
 def _apply_cnot_tensor(
     psi: np.ndarray, control: int, target: int, num_qubits: int
 ) -> np.ndarray:
-    """Apply CNOT gate between control and target axes of an n-qubit state tensor."""
     out = psi.copy()
     idx_ctrl_1 = [slice(None)] * num_qubits
     idx_ctrl_1[control] = 1

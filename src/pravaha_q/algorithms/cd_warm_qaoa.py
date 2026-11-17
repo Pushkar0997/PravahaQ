@@ -1,9 +1,11 @@
 """
 Counterdiabatic Warm-Started QAOA (CD-WarmQAOA)
 ===============================================
-Combines continuous QP/SDP warm-start initialization |psi_0> = bigotimes_i Ry(theta_i)|0>,
-Egger et al. rotated warm-start mixer, and 1-local/2-local counterdiabatic
-driving terms optimized via COBYLA.
+Uses the exact Egger et al. (2021) rotated-Z warm-start mixer:
+    U_M^{(ws)}(beta) = bigotimes_i Ry(theta_i) Rz(-2 beta) Ry(-theta_i)
+                     = exp(i beta sum_i (sin(theta_i) X_i + cos(theta_i) Z_i))
+which preserves the warm-start state |psi_0> = bigotimes_i Ry(theta_i)|0> up to
+global phase exp(i N beta).
 """
 
 from __future__ import annotations
@@ -14,8 +16,8 @@ import numpy as np
 from scipy.optimize import minimize
 
 from pravaha_q.algorithms.bf_dcqo import (
-    apply_single_qubit_rx,
     apply_single_qubit_ry,
+    apply_single_qubit_rz,
     apply_two_qubit_yz_zy,
     sample_bitstring_counts,
 )
@@ -43,6 +45,36 @@ class CDWarmQAOAResult:
     bitstring_counts: dict[str, int] = field(default_factory=dict)
 
 
+def prepare_warmstart_state(ry_angles_rad: list[float] | np.ndarray) -> np.ndarray:
+    """Prepare |psi_0> = bigotimes_{i=0}^{n-1} Ry(theta_i)|0> as an n-qubit tensor."""
+    n = len(ry_angles_rad)
+    state = np.zeros(1 << n, dtype=np.complex128)
+    state[0] = 1.0 + 0.0j
+    psi = state.reshape((2,) * n)
+    for i, theta_i in enumerate(ry_angles_rad):
+        psi = apply_single_qubit_ry(psi, i, float(theta_i))
+    return psi
+
+
+def apply_warmstart_mixer_layer(
+    psi: np.ndarray,
+    ry_angles_rad: list[float] | np.ndarray,
+    beta: float,
+) -> np.ndarray:
+    """
+    Apply the Egger et al. rotated-Z warm-start mixer:
+        U_M(beta) = bigotimes_i Ry(theta_i) Rz(-2 beta) Ry(-theta_i)
+    When applied to |psi_0> = bigotimes_i Ry(theta_i)|0>, this yields
+    exp(i N beta) |psi_0> (preserving |psi_0> up to pure global phase).
+    """
+    for i, theta_i in enumerate(ry_angles_rad):
+        t_val = float(theta_i)
+        psi = apply_single_qubit_ry(psi, i, -t_val)
+        psi = apply_single_qubit_rz(psi, i, -2.0 * float(beta))
+        psi = apply_single_qubit_ry(psi, i, t_val)
+    return psi
+
+
 class CDWarmQAOASolver:
     """Executes Counterdiabatic Warm-Started QAOA at depth p."""
 
@@ -63,16 +95,12 @@ class CDWarmQAOASolver:
     def solve(
         self, ising: IsingSpinGlass, hubo: HUBOPolynomial | None = None
     ) -> CDWarmQAOAResult:
-        """Warm-start from continuous relaxation and optimize (gamma, beta, alpha_cd)."""
         n = ising.num_qubits
         if hubo is not None:
             qp_res = solve_box_relaxed_hubo(hubo, seed=self.seed)
             c_init = qp_res.continuous_solution
         else:
-            # Fallback heuristic from linear fields h_i
-            scale_h = max(
-                (abs(v) for v in ising.h_linear.values()), default=1.0
-            )
+            scale_h = max((abs(v) for v in ising.h_linear.values()), default=1.0)
             c_init = [
                 float(0.5 + 0.35 * np.tanh(ising.h_linear.get(i, 0.0) / scale_h))
                 for i in range(n)
@@ -86,7 +114,6 @@ class CDWarmQAOASolver:
         norm_diag = (diag_cost - ising.constant_offset) / scale
         h_norm, j_norm, _ = ising.normalized_coefficients()
 
-        # 3 parameters per layer p: (gamma_l, beta_l, alpha_cd_l)
         init_params: list[float] = []
         for layer in range(self.reps_p):
             frac = (layer + 1) / (self.reps_p + 1)
@@ -95,13 +122,7 @@ class CDWarmQAOASolver:
         energy_trace: list[float] = []
 
         def simulate_state(params: np.ndarray) -> np.ndarray:
-            state = np.zeros(1 << n, dtype=np.complex128)
-            state[0] = 1.0 + 0.0j
-            psi = state.reshape((2,) * n)
-
-            # Warm-start state preparation: bigotimes_i Ry(theta_i) |0>
-            for i, theta_i in enumerate(ws_sched.ry_angles_rad):
-                psi = apply_single_qubit_ry(psi, i, theta_i)
+            psi = prepare_warmstart_state(ws_sched.ry_angles_rad)
 
             for layer in range(self.reps_p):
                 gamma_l = float(params[3 * layer])
@@ -121,11 +142,8 @@ class CDWarmQAOASolver:
                             psi, i, j, 0.5 * alpha_l * j_val, n
                         )
 
-                # 3. Rotated Warm-Start Mixer: Ry(theta_i) Rz(-2 beta_l) Ry(-theta_i)
-                for i, theta_i in enumerate(ws_sched.ry_angles_rad):
-                    psi = apply_single_qubit_ry(psi, i, -theta_i)
-                    psi = apply_single_qubit_rx(psi, i, -2.0 * beta_l)
-                    psi = apply_single_qubit_ry(psi, i, theta_i)
+                # 3. Verified Rotated-Z Warm-Start Mixer: Ry(theta_i) Rz(-2 beta_l) Ry(-theta_i)
+                psi = apply_warmstart_mixer_layer(psi, ws_sched.ry_angles_rad, beta_l)
 
             return psi.reshape(-1)
 

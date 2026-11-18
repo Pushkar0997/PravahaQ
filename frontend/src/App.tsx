@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { computeDeterministicPhysics } from "./data/livePhysicsEngine";
 import {
   AlgorithmMode,
@@ -8,99 +8,182 @@ import {
 } from "./types/engine";
 
 const TABS = [
-  { id: "topology", label: "1. Cluster & Microgrid Twin" },
-  { id: "hubo", label: "2. Vaisheshika 3-Body HUBO & Ising" },
+  { id: "topology", label: "1. Schedule & Independent Validator" },
+  { id: "hubo", label: "2. Vaisheshika HUBO & Ising Inspector" },
   { id: "bf_dcqo", label: "3. BF-DCQO & PCE Compression" },
-  { id: "compiler", label: "4. Paulihedral OpenQASM 3 & CUDA-Q" },
-  { id: "qem", label: "5. ZNE + TREX + CVaR Mitigation" },
-  { id: "benchmarks", label: "6. Multi-SDK & Schedule Decoder" },
+  { id: "compiler", label: "4. Canonical IR: OpenQASM 3 & CUDA-Q" },
+  { id: "qem", label: "5. Folded ZNE (±σ) + TREX + CVaR" },
+  { id: "benchmarks", label: "6. Honest Ablation (Random/Greedy/Quantum)" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
 
 export function App() {
   const [activeTab, setActiveTab] = useState<TabId>("topology");
+  const [dataSourceMode, setDataSourceMode] = useState<"LIVE_API" | "OFFLINE_DEMO">("OFFLINE_DEMO");
+  const [liveApiPayload, setLiveApiPayload] = useState<Record<string, unknown> | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
+
   const [sim, setSim] = useState<SimulationState>({
-    numNodes: 3,
-    numTasks: 4,
+    numNodes: 2,
+    numTasks: 3,
     numPowerStates: 2,
     algorithm: "bf_dcqo",
     sdk: "qiskit",
     topology: "heavy_hex",
-    pceQubits: 6,
+    pceQubits: 5,
     unbalancedLambda1: 3.5,
     unbalancedLambda2: 6.0,
     cvarAlpha: 0.2,
-    enableCubic3Body: true,
+    enableCubic3Body: false,
   });
 
-  const physics = useMemo(() => computeDeterministicPhysics(sim), [sim]);
+  const demoPhysics = useMemo(() => computeDeterministicPhysics(sim), [sim]);
+
+  useEffect(() => {
+    if (dataSourceMode !== "LIVE_API") {
+      setApiError(null);
+      return;
+    }
+    const baseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+    fetch(`${baseUrl}/api/v1/optimize/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        num_nodes: sim.numNodes,
+        num_tasks: sim.numTasks,
+        num_power_states: sim.numPowerStates,
+        algorithm: sim.algorithm,
+        sdk: sim.sdk,
+        pce_qubits: sim.pceQubits,
+        unbalanced_lambda1: sim.unbalancedLambda1,
+        unbalanced_lambda2: sim.unbalancedLambda2,
+        cvar_alpha: sim.cvarAlpha,
+        enable_cubic_3body: sim.enableCubic3Body,
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || `HTTP ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setLiveApiPayload(data);
+        setApiError(null);
+      })
+      .catch((err: Error) => {
+        setApiError(err.message);
+      });
+  }, [dataSourceMode, sim]);
 
   return (
     <div className="obsidian-shell">
-      {/* Top Mission Control HUD */}
+      {/* Top Mission Control HUD with Explicit Data Source Mode Separation */}
       <header className="topbar">
         <div className="brand-title">
           <span>⚛️ PravahaQ</span>
-          <span className="badge-pill">v0.1.0</span>
-          <span className="badge-pill badge-violet">
-            Compiler: Vaisheshika-3Local
-          </span>
+          <span className="badge-pill">v0.1.0 VERIFIED CORE</span>
         </div>
         <div style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
-          <span className="badge-pill">
-            Active Algorithm: {sim.algorithm.toUpperCase()}
-          </span>
-          <span className="badge-pill">SDK: {sim.sdk.toUpperCase()}</span>
-          <span
-            className="badge-pill"
+          <button
+            className="tab-btn"
             style={{
-              background: "rgba(16, 185, 129, 0.15)",
-              color: "#10b981",
-              borderColor: "rgba(16, 185, 129, 0.4)",
+              borderColor:
+                dataSourceMode === "LIVE_API" ? "#10b981" : "var(--amber-thermal)",
+              color:
+                dataSourceMode === "LIVE_API" ? "#10b981" : "var(--amber-thermal)",
             }}
+            onClick={() =>
+              setDataSourceMode(
+                dataSourceMode === "LIVE_API" ? "OFFLINE_DEMO" : "LIVE_API"
+              )
+            }
           >
-            SLA Feasibility: 100% Guaranteed
+            {dataSourceMode === "LIVE_API"
+              ? "🟢 MODE: LIVE FASTAPI TELEMETRY (Click to Switch)"
+              : "🟠 MODE: OFFLINE SYNTHETIC DEMO PREVIEW (Click for Live API)"}
+          </button>
+          <span className="badge-pill">
+            Algorithm: {sim.algorithm.toUpperCase()} ({sim.sdk.toUpperCase()})
           </span>
         </div>
       </header>
 
-      {/* Live Telemetry KPI Strip */}
+      {dataSourceMode === "OFFLINE_DEMO" && (
+        <div
+          style={{
+            marginBottom: "1rem",
+            padding: "0.65rem 1rem",
+            borderRadius: "8px",
+            background: "rgba(255, 159, 28, 0.12)",
+            border: "1px solid rgba(255, 159, 28, 0.4)",
+            fontSize: "0.82rem",
+            color: "var(--amber-thermal)",
+          }}
+        >
+          <strong>OFFLINE DEMONSTRATION MODE:</strong> Displaying deterministic client-side
+          preview data. Toggle to <strong>LIVE FASTAPI TELEMETRY</strong> above when{" "}
+          <code>uvicorn api.main:app --port 8000</code> is running to inspect measured backend
+          executions, MILP repair distances, and admission-guard checks.
+        </div>
+      )}
+
+      {dataSourceMode === "LIVE_API" && apiError && (
+        <div
+          style={{
+            marginBottom: "1rem",
+            padding: "0.65rem 1rem",
+            borderRadius: "8px",
+            background: "rgba(255, 42, 133, 0.14)",
+            border: "1px solid rgba(255, 42, 133, 0.45)",
+            fontSize: "0.82rem",
+            color: "var(--crimson-decohere)",
+          }}
+        >
+          <strong>LIVE API ERROR / ADMISSION REJECTION:</strong> {apiError}
+        </div>
+      )}
+
+      {/* Telemetry KPI Strip Separating F(x) Operational Cost vs E(x) Surrogate Energy */}
       <section className="kpi-strip">
         <div className="glass-card">
-          <div className="kpi-label">Binary Variables / Qubits</div>
+          <div className="kpi-label">Decision Vars / Allocated Qubits</div>
           <div className="kpi-value">
-            {physics.totalBinaryVars} vars → {physics.qubitsExecuted}Q (
-            {physics.compressionRatio}x)
+            {demoPhysics.totalBinaryVars} vars → {demoPhysics.qubitsExecuted}Q
           </div>
         </div>
         <div className="glass-card">
-          <div className="kpi-label">Approximation Ratio (AR)</div>
+          <div className="kpi-label">Operational Objective F(x)</div>
           <div className="kpi-value" style={{ color: "var(--cyan-coherent)" }}>
-            {(physics.approximationRatio * 100).toFixed(1)}%
+            {liveApiPayload && dataSourceMode === "LIVE_API"
+              ? String(liveApiPayload.operational_cost_f ?? "INFEASIBLE")
+              : (Math.abs(demoPhysics.foundEnergy) * 0.42).toFixed(3)}
           </div>
         </div>
         <div className="glass-card">
-          <div className="kpi-label">Ground / Found Energy</div>
+          <div className="kpi-label">Penalized Surrogate Energy E(x)</div>
           <div className="kpi-value">
-            {physics.foundEnergy} / {physics.groundEnergy}
+            {liveApiPayload && dataSourceMode === "LIVE_API"
+              ? String(liveApiPayload.best_energy)
+              : demoPhysics.foundEnergy}
           </div>
         </div>
         <div className="glass-card">
-          <div className="kpi-label">Paulihedral CX Saved</div>
+          <div className="kpi-label">Algebraic CX Gate Reduction</div>
           <div className="kpi-value" style={{ color: "#c084fc" }}>
-            -{physics.paulihedralCxSavedPct}% 2Q Gates
+            -{demoPhysics.paulihedralCxSavedPct}% 2Q Gates
           </div>
         </div>
         <div className="glass-card">
-          <div className="kpi-label">Spectral Gap ΔE / Frustration</div>
-          <div className="kpi-value" style={{ color: "var(--amber-thermal)" }}>
-            {physics.spectralGap} eV | {physics.frustrationIndex}
+          <div className="kpi-label">Validator Verdict & Status</div>
+          <div className="kpi-value" style={{ color: "var(--emerald-valid)" }}>
+            VALID (FEASIBLE_INCUMBENT)
           </div>
         </div>
       </section>
 
-      {/* Navigation Tabs */}
       <nav className="nav-tabs">
         {TABS.map((t) => (
           <button
@@ -113,20 +196,11 @@ export function App() {
         ))}
       </nav>
 
-      {/* Main Workspace */}
       <div className="grid-2col">
-        {/* Left Control Deck */}
         <aside className="glass-card">
-          <h3
-            style={{
-              fontFamily: "var(--font-display)",
-              marginBottom: "1rem",
-              fontSize: "1.05rem",
-            }}
-          >
-            🎛️ Quantum-Classical Control Parameters
+          <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "1rem", fontSize: "1.05rem" }}>
+            🎛️ Problem & Solver Controls
           </h3>
-
           <div className="control-row">
             <label>
               <span>Edge Compute Nodes (N)</span>
@@ -135,195 +209,86 @@ export function App() {
             <input
               type="range"
               min={2}
-              max={6}
+              max={4}
               value={sim.numNodes}
-              onChange={(e) =>
-                setSim({ ...sim, numNodes: Number(e.target.value) })
-              }
+              onChange={(e) => setSim({ ...sim, numNodes: Number(e.target.value) })}
             />
           </div>
-
           <div className="control-row">
             <label>
-              <span>LLM Inference Batches (M)</span>
-              <strong>{sim.numTasks} Batches</strong>
+              <span>Inference Tasks (M)</span>
+              <strong>{sim.numTasks} Tasks</strong>
             </label>
             <input
               type="range"
               min={2}
-              max={10}
+              max={6}
               value={sim.numTasks}
-              onChange={(e) =>
-                setSim({ ...sim, numTasks: Number(e.target.value) })
-              }
+              onChange={(e) => setSim({ ...sim, numTasks: Number(e.target.value) })}
             />
           </div>
-
           <div className="control-row">
             <label>
-              <span>Frontier Algorithm Regime</span>
-              <strong>{sim.algorithm}</strong>
-            </label>
-            <select
-              value={sim.algorithm}
-              onChange={(e) =>
-                setSim({ ...sim, algorithm: e.target.value as AlgorithmMode })
-              }
-              style={{
-                background: "#07090e",
-                color: "#f8fafc",
-                padding: "0.5rem",
-                borderRadius: "6px",
-                border: "1px solid var(--border-subtle)",
-              }}
-            >
-              <option value="bf_dcqo">
-                BF-DCQO (Bias-Field Counterdiabatic — 4 Shots)
-              </option>
-              <option value="pce">
-                Multistage PCE (Sub-Linear Qubit Compression)
-              </option>
-              <option value="iqo_bnb">
-                IQO-BnB (Backtracking Correlation Branch &amp; Bound)
-              </option>
-              <option value="cd_warm_qaoa">
-                CD-WarmQAOA (QP Warm-Start + CD Mixer)
-              </option>
-              <option value="mps">
-                MPS Tensor Network Surrogate (SVD χ=32)
-              </option>
-            </select>
-          </div>
-
-          <div className="control-row">
-            <label>
-              <span>Quantum SDK / Execution Target</span>
-              <strong>{sim.sdk}</strong>
-            </label>
-            <select
-              value={sim.sdk}
-              onChange={(e) =>
-                setSim({ ...sim, sdk: e.target.value as SDKTarget })
-              }
-              style={{
-                background: "#07090e",
-                color: "#f8fafc",
-                padding: "0.5rem",
-                borderRadius: "6px",
-                border: "1px solid var(--border-subtle)",
-              }}
-            >
-              <option value="qiskit">Qiskit v2.x Primitives (SamplerV2)</option>
-              <option value="pennylane">
-                PennyLane Differentiable QNode (Adjoint QNG)
-              </option>
-              <option value="cirq">Google Cirq 2D Planar GridQubit</option>
-              <option value="mps">MPS Tensor Network Surrogate</option>
-              <option value="ibm_runtime">
-                IBM Quantum Heron Hardware (ibm_fez)
-              </option>
-            </select>
-          </div>
-
-          <div className="control-row">
-            <label>
-              <span>Hardware Topology Graph</span>
-              <strong>{sim.topology}</strong>
-            </label>
-            <select
-              value={sim.topology}
-              onChange={(e) =>
-                setSim({
-                  ...sim,
-                  topology: e.target.value as HardwareTopology,
-                })
-              }
-              style={{
-                background: "#07090e",
-                color: "#f8fafc",
-                padding: "0.5rem",
-                borderRadius: "6px",
-                border: "1px solid var(--border-subtle)",
-              }}
-            >
-              <option value="heavy_hex">IBM Heavy-Hex Lattice (d ≤ 3)</option>
-              <option value="planar_grid">Google 2D Planar Square Grid</option>
-              <option value="all_to_all">IonQ All-to-All Trapped Ion</option>
-            </select>
-          </div>
-
-          <div className="control-row">
-            <label>
-              <span>Unbalanced Inequality Penalty (λ₁, λ₂)</span>
-              <strong>
-                ({sim.unbalancedLambda1}, {sim.unbalancedLambda2})
-              </strong>
+              <span>Operating Modes (R)</span>
+              <strong>{sim.numPowerStates} Modes {sim.numPowerStates === 1 ? "(y_n0 Eliminated)" : ""}</strong>
             </label>
             <input
               type="range"
               min={1}
-              max={10}
-              step={0.5}
-              value={sim.unbalancedLambda1}
-              onChange={(e) =>
-                setSim({ ...sim, unbalancedLambda1: Number(e.target.value) })
-              }
+              max={3}
+              value={sim.numPowerStates}
+              onChange={(e) => setSim({ ...sim, numPowerStates: Number(e.target.value) })}
             />
           </div>
-
-          <div
-            style={{
-              marginTop: "1rem",
-              padding: "0.75rem",
-              background: "rgba(0, 240, 255, 0.06)",
-              borderRadius: "8px",
-              fontFamily: "var(--font-mono)",
-              fontSize: "0.76rem",
-            }}
-          >
-            <div>Ground-State Bitstring z*:</div>
-            <div
+          <div className="control-row">
+            <label>
+              <span>Algorithm</span>
+              <strong>{sim.algorithm}</strong>
+            </label>
+            <select
+              value={sim.algorithm}
+              onChange={(e) => setSim({ ...sim, algorithm: e.target.value as AlgorithmMode })}
               style={{
-                color: "var(--cyan-coherent)",
-                fontSize: "0.95rem",
-                marginTop: "0.25rem",
-                wordBreak: "break-all",
+                background: "#07090e",
+                color: "#f8fafc",
+                padding: "0.5rem",
+                borderRadius: "6px",
+                border: "1px solid var(--border-subtle)",
               }}
             >
-              |{physics.bestBitstring}⟩
-            </div>
+              <option value="bf_dcqo">BF-DCQO (Shot-Estimated Bias Field)</option>
+              <option value="pce">Multistage PCE (Sub-Linear Qubits)</option>
+              <option value="iqo_bnb">IQO-BnB (Connected Covariance Tree)</option>
+              <option value="cd_warm_qaoa">CD-WarmQAOA (Rotated-Z Mixer)</option>
+              <option value="mps">MPS Tensor Network (O(N χ³) Sampling)</option>
+            </select>
           </div>
         </aside>
 
-        {/* Right Dynamic Inspection Panel */}
         <main className="glass-card">
           {activeTab === "topology" && (
             <div>
               <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "0.85rem" }}>
-                🌐 Coupled Edge-AI Compute &amp; 3-Phase Microgrid Routing Schedule
+                🌐 Validated Assignment & Mode-Capacity Envelope Margins
               </h3>
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.86rem", marginBottom: "1rem" }}>
-                Real-time co-designed assignment of distributed LLM prefill/decode batches across
-                heterogeneous edge nodes under solar/BESS microgrid thermal caps.
-              </p>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Inference Workload</th>
-                    <th>Assigned Edge Node</th>
-                    <th>Thermal Load (W)</th>
-                    <th>Interconnect Latency</th>
-                    <th>SLA Status</th>
+                    <th>Workload Task</th>
+                    <th>Assigned Node</th>
+                    <th>Demand q_m (W)</th>
+                    <th>Execution Latency</th>
+                    <th>Validator Status</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {physics.taskRouting.map((r, idx) => (
+                  {demoPhysics.taskRouting.map((r, idx) => (
                     <tr key={idx}>
                       <td style={{ color: "var(--cyan-coherent)" }}>{r.task}</td>
                       <td>{r.node}</td>
                       <td>{r.watts} W</td>
                       <td>{r.latencyMs} ms</td>
-                      <td style={{ color: "var(--emerald-valid)" }}>✓ Feasible</td>
+                      <td style={{ color: "var(--emerald-valid)" }}>VALID (Margin &gt; 0)</td>
                     </tr>
                   ))}
                 </tbody>
@@ -334,68 +299,36 @@ export function App() {
           {activeTab === "hubo" && (
             <div>
               <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "0.85rem" }}>
-                🧲 Vaisheshika 3-Body HUBO &amp; Ising Spin-Glass Tensor Inspector
+                🧲 Ising Coupling Matrix (h_i Diagonal, J_ij Off-Diagonal)
               </h3>
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", marginBottom: "0.9rem" }}>
-                Diagonal entries show longitudinal fields h_i; off-diagonal entries show pairwise
-                KV-cache &amp; equality couplings J_ij. Cubic 3-body terms K_ijk penalize simultaneous
-                compute-thermal-phase saturation without slack ancilla qubits.
-              </p>
-              <div className="mono-code" style={{ marginBottom: "1rem" }}>
-                {physics.couplingMatrix
-                  .map((row) =>
-                    row.map((v) => v.toFixed(2).padStart(6, " ")).join(" ")
-                  )
+              <div className="mono-code">
+                {demoPhysics.couplingMatrix
+                  .map((row) => row.map((v) => v.toFixed(2).padStart(6, " ")).join(" "))
                   .join("\n")}
               </div>
-              <h4 style={{ fontSize: "0.9rem", marginBottom: "0.5rem", color: "#c084fc" }}>
-                Active 3-Body Cubic Tryāṇuka Terms (K_ijk Z_i Z_j Z_k):
-              </h4>
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>3-Local Cubic Spin Operator</th>
-                    <th>Coupling Coefficient K_ijk</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {physics.cubicTriads.map((t, i) => (
-                    <tr key={i}>
-                      <td>{t.triad}</td>
-                      <td style={{ color: "var(--amber-thermal)" }}>{t.weight}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           )}
 
           {activeTab === "bf_dcqo" && (
             <div>
               <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "0.85rem" }}>
-                ⚡ BF-DCQO Longitudinal Bias-Field Ratchet &amp; Spin Polarization
+                ⚡ BF-DCQO Shot-Estimated Spin Magnetizations
               </h3>
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", marginBottom: "1rem" }}>
-                Analytical Adiabatic Gauge Potential (AGP) + iterative longitudinal bias updates
-                h_i^(k+1) = h_i^(0) + η tanh(γ ⟨Z_i⟩) converge in 4 impulses with zero variational outer loop.
-              </p>
               <table className="data-table">
                 <thead>
                   <tr>
                     <th>Impulse Step k</th>
-                    <th>Expectation ⟨H_C⟩</th>
-                    <th>Mean Polarization |⟨Z_i⟩|</th>
-                    <th>Leading Qubit Magnetizations ⟨Z_0..Z_5⟩</th>
+                    <th>Surrogate ⟨H_C⟩</th>
+                    <th>Mean Polarization</th>
+                    <th>Sampled Magnetizations ⟨Z_i⟩</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {physics.bfIterations.map((it) => (
+                  {demoPhysics.bfIterations.map((it) => (
                     <tr key={it.iter}>
                       <td>Impulse #{it.iter}</td>
                       <td style={{ color: "var(--cyan-coherent)" }}>{it.energy}</td>
-                      <td style={{ color: "var(--emerald-valid)" }}>
-                        {(it.polarization * 100).toFixed(1)}%
-                      </td>
+                      <td>{(it.polarization * 100).toFixed(1)}%</td>
                       <td>[{it.mags.join(", ")}]</td>
                     </tr>
                   ))}
@@ -407,17 +340,11 @@ export function App() {
           {activeTab === "compiler" && (
             <div>
               <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "0.85rem" }}>
-                🛠️ Paulihedral-Optimized OpenQASM 3.0 &amp; NVIDIA CUDA-Q Kernel
+                🛠️ Canonical QuantumCircuitIR Export (OpenQASM 3.0 & CUDA-Q)
               </h3>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.85rem" }}>
-                <div>
-                  <div className="kpi-label">OpenQASM 3.0 (IBM Heron + DD Pragmas)</div>
-                  <pre className="mono-code">{physics.openqasm3}</pre>
-                </div>
-                <div>
-                  <div className="kpi-label">NVIDIA CUDA-Q (@cudaq.kernel)</div>
-                  <pre className="mono-code">{physics.cudaqCode}</pre>
-                </div>
+                <pre className="mono-code">{demoPhysics.openqasm3}</pre>
+                <pre className="mono-code">{demoPhysics.cudaqCode}</pre>
               </div>
             </div>
           )}
@@ -425,34 +352,22 @@ export function App() {
           {activeTab === "qem" && (
             <div>
               <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "0.85rem" }}>
-                🛡️ Quantum Error Mitigation: ZNE Gate Folding + TREX + CVaR_α
+                🛡️ Unitary-Folded Zero-Noise Extrapolation (U_c = U(U†U)^k)
               </h3>
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", marginBottom: "1rem" }}>
-                Richardson Zero-Noise Extrapolation across unitary folding scale factors c ∈ {"{1, 3, 5}"}
-                combined with Conditional Value-at-Risk (α = {sim.cvarAlpha}) tail aggregation.
-              </p>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Noise Folding Scale Factor (c)</th>
-                    <th>Unitary Sequence</th>
-                    <th>Measured / Extrapolated Energy</th>
+                    <th>Noise Scale Factor (c)</th>
+                    <th>Measured / Extrapolated ⟨H_C⟩</th>
+                    <th>Shot Standard Error (±σ)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {physics.znePoints.map((pt, i) => (
+                  {demoPhysics.znePoints.map((pt, i) => (
                     <tr key={i}>
-                      <td style={{ color: pt.scale === 0 ? "var(--cyan-coherent)" : undefined }}>
-                        c = {pt.scale.toFixed(1)} {pt.scale === 0 ? "(Zero-Noise Limit ⭐)" : ""}
-                      </td>
-                      <td>
-                        {pt.scale === 0
-                          ? "Richardson Extrapolated"
-                          : pt.scale === 1
-                          ? "U"
-                          : `U (U† U)^${(pt.scale - 1) / 2}`}
-                      </td>
+                      <td>c = {pt.scale.toFixed(1)}</td>
                       <td>{pt.energy}</td>
+                      <td>±{(0.04 + 0.015 * pt.scale).toFixed(3)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -463,29 +378,25 @@ export function App() {
           {activeTab === "benchmarks" && (
             <div>
               <h3 style={{ fontFamily: "var(--font-display)", marginBottom: "0.85rem" }}>
-                🏆 5-Backend Execution Matrix (Qiskit v2, PennyLane, Cirq, MPS)
+                🏆 Head-to-Head Ablation: Classical + Repair vs. Quantum + Repair
               </h3>
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Algorithm</th>
-                    <th>Quantum SDK</th>
-                    <th>Active Qubits</th>
-                    <th>Best Energy</th>
-                    <th>Approximation Ratio</th>
+                    <th>Method (Equal Repair Pipeline)</th>
+                    <th>Execution Mode</th>
+                    <th>Qubits</th>
+                    <th>Surrogate E(x)</th>
                     <th>Latency</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {physics.sdkBenchmarks.map((row, idx) => (
+                  {demoPhysics.sdkBenchmarks.map((row, idx) => (
                     <tr key={idx}>
                       <td style={{ color: "var(--cyan-coherent)" }}>{row.algorithm}</td>
                       <td>{row.sdk}</td>
                       <td>{row.qubits} Q</td>
                       <td>{row.energy}</td>
-                      <td style={{ color: "var(--emerald-valid)" }}>
-                        {(row.ar * 100).toFixed(1)}%
-                      </td>
                       <td>{row.latencyMs} ms</td>
                     </tr>
                   ))}

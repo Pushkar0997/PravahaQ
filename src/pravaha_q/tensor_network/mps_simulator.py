@@ -174,9 +174,9 @@ class MPSSimulator:
         env = np.ones((1, 1), dtype=np.complex128)
         for q, t_q in enumerate(tensors):
             op = _PAULI_OPS[pauli_map.get(q, "I")]
-            # Contract env[a, a'] with t_q[a, s, b], op[s', s], conj(t_q)[a', s', b']
+            # Contract env[a, A] with t_op[a, s, b] and conj(t_q)[A, s, B] -> next_env[b, B]
             t_op = np.einsum("sp,apb->asb", op, t_q)
-            env = np.einsum("aa,asb,aSb->bB", env, t_op, np.conj(t_q))
+            env = np.einsum("aA,asb,AsB->bB", env, t_op, np.conj(t_q))
         return float(np.real(env[0, 0]))
 
     @classmethod
@@ -344,7 +344,7 @@ def _apply_adjacent_gate_svd(
     """
     Apply a 2-site gate `gate_4d[s'_u, s'_{u+1}, s_u, s_{u+1}]` to adjacent MPS
     tensors `(site_u, site_u + 1)` and truncate bond dimension to `max_bond` via SVD.
-    Returns the discarded spectral weight squared `sum_{k >= chi} sigma_k^2`.
+    Returns the relative discarded spectral weight squared `sum_{k >= chi} sigma_k^2 / sum sigma^2`.
     """
     t_u = tensors[site_u]
     t_v = tensors[site_u + 1]
@@ -359,22 +359,25 @@ def _apply_adjacent_gate_svd(
     mat = gated.reshape(alpha_dim * 2, 2 * beta_dim)
     u_mat, s_vals, vh_mat = np.linalg.svd(mat, full_matrices=False)
 
-    # Normalize singular values to preserve state norm
     norm_sq = float(np.sum(s_vals**2))
-    if norm_sq > 1e-15:
-        s_vals = s_vals / np.sqrt(norm_sq)
+    if len(s_vals) <= max_bond:
+        tensors[site_u] = u_mat.reshape(alpha_dim, 2, len(s_vals))
+        tensors[site_u + 1] = (np.diag(s_vals) @ vh_mat).reshape(
+            len(s_vals), 2, beta_dim
+        )
+        return 0.0
 
-    chi = min(len(s_vals), max_bond)
-    discarded_sq = float(np.sum(s_vals[chi:] ** 2)) if len(s_vals) > chi else 0.0
+    chi = max_bond
+    discarded_sq = float(np.sum(s_vals[chi:] ** 2)) / max(norm_sq, 1e-15)
 
     u_trunc = u_mat[:, :chi]
     s_trunc = s_vals[:chi]
     vh_trunc = vh_mat[:chi, :]
 
-    # Re-normalize retained singular values so state remains unit-norm
-    ret_norm = float(np.sqrt(np.sum(s_trunc**2)))
-    if ret_norm > 1e-15:
-        s_trunc = s_trunc / ret_norm
+    # Preserve local Frobenius norm sqrt(norm_sq) of theta after truncation
+    ret_sq = float(np.sum(s_trunc**2))
+    if ret_sq > 1e-15:
+        s_trunc = s_trunc * np.sqrt(norm_sq / ret_sq)
 
     tensors[site_u] = u_trunc.reshape(alpha_dim, 2, chi)
     tensors[site_u + 1] = (np.diag(s_trunc) @ vh_trunc).reshape(

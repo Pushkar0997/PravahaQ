@@ -38,7 +38,7 @@ from pravaha_q.tensor_network.mps_simulator import MPSSimulator
 def test_1_algebraic_gate_cancellation_preserves_exact_statevector() -> None:
     """Verify U_opt |0> == U_unopt |0> to 1e-14 and actual CX count decreases."""
     prob = generate_coupled_problem(
-        num_nodes=2, num_tasks=3, num_power_states=1, seed=42
+        num_nodes=2, num_tasks=2, num_power_states=2, seed=42
     )
     hubo = VaisheshikaHUBOCompiler(enable_cubic_terms=True).compile(prob)
     ising = hubo_to_ising(hubo)

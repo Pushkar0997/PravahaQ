@@ -230,7 +230,7 @@ class MPSSimulator:
         for q in range(n - 1, -1, -1):
             t_q = tensors[q]
             right_envs[q] = np.einsum(
-                "asb,AB,aSB->aA", t_q, right_envs[q + 1], np.conj(t_q)
+                "asb,bB,AsB->aA", t_q, right_envs[q + 1], np.conj(t_q)
             )
 
         rng = np.random.default_rng(seed)
